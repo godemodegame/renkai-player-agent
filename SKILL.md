@@ -32,7 +32,8 @@ node {baseDir}/scripts/renkai.mjs setup --direction <direction> --resources <com
 node {baseDir}/scripts/renkai.mjs automation install --runtime <hermes|openclaw> --notify-channel <origin|channel> [--notify-to <recipient>]
 ```
 
-9. Run `doctor`. Onboarding is incomplete while it reports `battle_setup_required`. The guarantee requires the selected runtime Gateway/scheduler to remain running.
+   Use this CLI command only. Do not call the runtime's cron tool yourself and do not create a separate `renkai-quests-step` job. The installer first verifies the server-side policy, writes the wrapper into the Gateway's actual data directory, removes stale duplicates by job ID, and runs a test.
+9. Run `doctor`. Onboarding is incomplete while it reports `battle_setup_required`. The guarantee requires the selected runtime Gateway/scheduler to remain running. If an older installation reports a missing script or duplicate jobs, run `automation repair` once and then rerun `doctor`.
 
 ## Play
 
@@ -78,4 +79,5 @@ Read [game-rules.md](references/game-rules.md) when choosing or explaining a str
 - Do not fund the agent wallet or request mainnet assets. Renkai currently reports devnet and gameplay state is off-chain.
 - Do not start a second action while the player is locked or has an active quest.
 - Do not remove or pause `renkai-mandatory-battles`. Policy changes before pledge lock apply to the current window; later changes apply to the next one.
+- Do not create cron jobs directly during onboarding. `automation install|repair` is the sole owner of the mandatory scheduler and removes the obsolete `renkai-quests-step` job.
 - Treat `WAR_PARTICIPATION_RESERVED` as an intentional wait until its `retryAt`, not as a reason to bypass the API guard.

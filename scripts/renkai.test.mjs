@@ -16,9 +16,11 @@ import {
   cycleTarget,
   installAutomation,
   main,
+  namedJobIds,
   parseReferralInput,
   repairAutomation,
   registrationRequestBody,
+  resolveHermesScriptsDir,
   signRequest,
 } from "./renkai.mjs";
 
@@ -347,24 +349,33 @@ test("Hermes and OpenClaw adapters install exact script-only jobs without duplic
     };
     await writeFile(configPath, JSON.stringify(config));
     const calls = [];
-    let installed = false;
+    let jobs = [];
+    const renderJobs = () => runtime === "hermes"
+      ? jobs.map((job) => `  ${job.id} enabled\n    Name:      ${job.name}\n    Schedule:  every 1m`).join("\n\n")
+      : JSON.stringify({ jobs });
     const runner = (binary, args) => {
       calls.push({ binary, args });
-      if (args[0] === "cron" && args[1] === "list") return { stdout: installed ? `job ${runtime} renkai-mandatory-battles` : "" };
+      if (args[0] === "cron" && args[1] === "list") return { stdout: renderJobs() };
       if (args[0] === "cron" && args[1] === "remove") {
-        installed = false;
+        jobs = jobs.filter((job) => job.id !== args[2]);
         return { stdout: "removed" };
       }
       if (args[0] === "cron" && args[1] === "create") {
-        installed = true;
-        return { stdout: JSON.stringify({ id: `${runtime}12345678` }) };
+        const id = runtime === "hermes" ? "a1b2c3d4e5f6" : "openclaw12345678";
+        jobs.push({ id, name: "renkai-mandatory-battles" });
+        return { stdout: JSON.stringify({ id }) };
       }
       return { stdout: "ok" };
     };
     const flags = runtime === "hermes"
       ? { "notify-channel": "origin" }
       : { "notify-channel": "telegram", "notify-to": "123" };
-    const first = await installAutomation(configPath, config, runtime, flags, { runner, hermesScriptsDir: join(directory, "scripts") });
+    const options = {
+      runner,
+      hermesScriptsDir: join(directory, "scripts"),
+      request: async () => ({ policy: { mode: "defend", targetCastleId: null, updatedAt: "2026-07-18T00:00:00.000Z" } }),
+    };
+    const first = await installAutomation(configPath, config, runtime, flags, options);
     assert.equal(first.testRun, "passed");
     const createCall = calls.find((call) => call.args[1] === "create");
     if (runtime === "hermes") {
@@ -376,13 +387,100 @@ test("Hermes and OpenClaw adapters install exact script-only jobs without duplic
       assert.equal(createCall.args.includes("--exact"), true);
     }
     const before = calls.filter((call) => call.args[1] === "create").length;
-    const repeated = await installAutomation(configPath, config, runtime, flags, { runner, hermesScriptsDir: join(directory, "scripts") });
+    const repeated = await installAutomation(configPath, config, runtime, flags, options);
     assert.equal(repeated.existing, true);
     assert.equal(calls.filter((call) => call.args[1] === "create").length, before);
     assert.equal((await automationStatus(config, { runner })).installed, true);
-    const repaired = await repairAutomation(configPath, config, runtime, flags, { runner, hermesScriptsDir: join(directory, "scripts") });
+    const repaired = await repairAutomation(configPath, config, runtime, flags, options);
     assert.equal(repaired.testRun, "passed");
     assert.equal(calls.some((call) => call.args[1] === "remove"), true);
     assert.equal(calls.filter((call) => call.args[1] === "create").length, before + 1);
   }
+});
+
+test("Hermes Docker scripts directory honors HERMES_HOME and survives missing Gateway env", () => {
+  assert.equal(resolveHermesScriptsDir({ env: { HERMES_HOME: "/srv/hermes" }, pathExists: () => false }), "/srv/hermes/scripts");
+  assert.equal(resolveHermesScriptsDir({ env: {}, pathExists: (path) => path === "/opt/data" }), "/opt/data/scripts");
+  assert.equal(resolveHermesScriptsDir({ env: {}, pathExists: () => false, homeDir: "/home/player" }), "/home/player/.hermes/scripts");
+});
+
+test("Hermes job parser finds every exact duplicate ID without touching other jobs", () => {
+  const output = [
+    "  8dbaa619c480 enabled\n    Name:      renkai-mandatory-battles\n    Schedule:  every 1m",
+    "  d7dcda121c84 enabled\n    Name:      renkai-mandatory-battles\n    Schedule:  every 1m",
+    "  e81c471fbf75 enabled\n    Name:      renkai-quests-step\n    Schedule:  every 1m",
+    "  deadbeef1234 enabled\n    Name:      unrelated\n    Schedule:  every 1m",
+  ].join("\n\n");
+  assert.deepEqual(namedJobIds(output, "renkai-mandatory-battles"), ["8dbaa619c480", "d7dcda121c84"]);
+  assert.deepEqual(namedJobIds(output, "renkai-quests-step"), ["e81c471fbf75"]);
+});
+
+test("Hermes install repairs duplicate battle jobs, removes legacy quest jobs, and writes the Gateway wrapper", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "renkai-hermes-repair-test-"));
+  const configPath = join(directory, "agent.json");
+  const scriptsDir = join(directory, "opt-data", "scripts");
+  const config = {
+    version: 2,
+    ...createWallet(),
+    baseUrl: "https://example.invalid",
+    agentKey: "secret",
+    profile: { direction: "defender", resources: ["common"], goal: "balanced" },
+    battle: { mode: "defend", targetCastleId: null },
+    automation: { runtime: "hermes", jobId: "8dbaa619c480", lastRunAt: null, lastPledgedWindowId: null, lastAlertedWindowId: null, notification: null },
+  };
+  await writeFile(configPath, JSON.stringify(config));
+  let jobs = [
+    { id: "8dbaa619c480", name: "renkai-mandatory-battles" },
+    { id: "d7dcda121c84", name: "renkai-mandatory-battles" },
+    { id: "e81c471fbf75", name: "renkai-quests-step" },
+    { id: "0556ebf1ded1", name: "renkai-quests-step" },
+  ];
+  const removed = [];
+  const runner = (_binary, args) => {
+    if (args[0] === "cron" && args[1] === "list") {
+      return { stdout: jobs.map((job) => `  ${job.id} enabled\n    Name:      ${job.name}`).join("\n\n") };
+    }
+    if (args[0] === "cron" && args[1] === "remove") {
+      removed.push(args[2]);
+      jobs = jobs.filter((job) => job.id !== args[2]);
+      return { stdout: "removed" };
+    }
+    if (args[0] === "cron" && args[1] === "create") {
+      jobs.push({ id: "abc123def456", name: "renkai-mandatory-battles" });
+      return { stdout: JSON.stringify({ id: "abc123def456" }) };
+    }
+    return { stdout: "ok" };
+  };
+  const result = await installAutomation(configPath, config, "hermes", { "notify-channel": "origin" }, {
+    runner,
+    hermesScriptsDir: scriptsDir,
+    request: async () => ({ policy: { mode: "defend", targetCastleId: null, updatedAt: "2026-07-18T00:00:00.000Z" } }),
+  });
+  assert.deepEqual(new Set(removed), new Set(["8dbaa619c480", "d7dcda121c84", "e81c471fbf75", "0556ebf1ded1"]));
+  assert.deepEqual(jobs, [{ id: "abc123def456", name: "renkai-mandatory-battles" }]);
+  assert.equal(result.scriptPath, join(scriptsDir, "renkai-mandatory-battles.sh"));
+  assert.match(await readFile(result.scriptPath, "utf8"), /battle-tick --quiet/);
+});
+
+test("automation creates no cron job until the server confirms battle policy", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "renkai-policy-guard-test-"));
+  const configPath = join(directory, "agent.json");
+  const config = {
+    version: 2,
+    ...createWallet(),
+    baseUrl: "https://example.invalid",
+    agentKey: "secret",
+    profile: { direction: "defender", resources: ["common"], goal: "balanced" },
+    battle: { mode: "defend", targetCastleId: null },
+    automation: { runtime: null, jobId: null, lastRunAt: null, lastPledgedWindowId: null, lastAlertedWindowId: null, notification: null },
+  };
+  const calls = [];
+  await assert.rejects(
+    installAutomation(configPath, config, "hermes", { "notify-channel": "origin" }, {
+      runner: (binary, args) => { calls.push({ binary, args }); return { stdout: "" }; },
+      request: async () => ({ policy: null }),
+    }),
+    { code: "BATTLE_SETUP_REQUIRED" },
+  );
+  assert.deepEqual(calls, []);
 });

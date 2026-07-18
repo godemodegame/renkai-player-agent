@@ -2,6 +2,7 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash, createPrivateKey, generateKeyPairSync, randomUUID, sign } from "node:crypto";
+import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -13,6 +14,7 @@ const WAITLIST_ACCESS = {
   discord: "https://discord.gg/fGVDhhk9t",
 };
 const AUTOMATION_NAME = "renkai-mandatory-battles";
+const LEGACY_QUEST_AUTOMATION_NAME = "renkai-quests-step";
 const WAR_SLOT_MS = 8 * 60 * 60 * 1000;
 const WAR_RESERVE_MS = 20 * 60 * 1000;
 const WAR_LOCK_MS = 5 * 60 * 1000;
@@ -149,6 +151,7 @@ function emptyAutomation() {
   return {
     runtime: null,
     jobId: null,
+    scriptPath: null,
     lastRunAt: null,
     lastPledgedWindowId: null,
     lastAlertedWindowId: null,
@@ -531,6 +534,54 @@ function parseJobId(output) {
   }
 }
 
+function stripAnsi(value) {
+  return String(value ?? "").replace(/\x1B\[[0-?]*[ -\/]*[@-~]/g, "");
+}
+
+function jobsFromJson(value, jobs = []) {
+  if (Array.isArray(value)) {
+    for (const item of value) jobsFromJson(item, jobs);
+    return jobs;
+  }
+  if (!value || typeof value !== "object") return jobs;
+  const id = value.id ?? value.jobId ?? value.job_id;
+  const name = value.name ?? value.jobName ?? value.job_name;
+  if (id && name) jobs.push({ id: String(id), name: String(name) });
+  for (const nested of Object.values(value)) jobsFromJson(nested, jobs);
+  return jobs;
+}
+
+export function namedJobIds(output, expectedName) {
+  const plain = stripAnsi(output);
+  try {
+    const parsed = jobsFromJson(JSON.parse(plain));
+    return [...new Set(parsed.filter((job) => job.name === expectedName).map((job) => job.id))];
+  } catch {
+    // Hermes renders each job as a blank-line-separated block with the ID first
+    // and an indented `Name:` field. Keep the parser strict so unrelated jobs
+    // are never removed.
+  }
+  const ids = [];
+  for (const block of plain.split(/\n\s*\n/)) {
+    const name = block.match(/^\s*Name:\s*(.+?)\s*$/mi)?.[1];
+    if (name !== expectedName) continue;
+    const id = block.match(/^\s*([A-Za-z0-9_-]{6,})\b/m)?.[1];
+    if (id) ids.push(id);
+  }
+  return [...new Set(ids)];
+}
+
+export function resolveHermesScriptsDir(options = {}) {
+  const env = options.env ?? process.env;
+  const pathExists = options.pathExists ?? existsSync;
+  if (env.HERMES_HOME) return join(resolve(env.HERMES_HOME), "scripts");
+  // Hermes Docker mounts its persistent data at /opt/data. Some Gateway
+  // launch paths have historically omitted HERMES_HOME from child processes,
+  // so detect the mounted directory before falling back to a host install.
+  if (pathExists("/opt/data")) return "/opt/data/scripts";
+  return join(options.homeDir ?? homedir(), ".hermes", "scripts");
+}
+
 function notificationFrom(flags, existing) {
   if (flags["notify-channel"]) return { channel: flags["notify-channel"], recipient: flags["notify-to"] ?? null };
   if (existing?.channel) return existing;
@@ -552,15 +603,40 @@ function runtimeList(runtime, runner) {
   return runner(binary, ["cron", "list", ...(runtime === "openclaw" ? ["--json"] : [])]).stdout;
 }
 
+function removeNamedJobs(runtime, name, runner, listedOutput) {
+  const binary = runtime === "hermes" ? "hermes" : "openclaw";
+  const output = listedOutput ?? runtimeList(runtime, runner);
+  const ids = namedJobIds(output, name);
+  for (const id of ids) runner(binary, ["cron", "remove", id]);
+  return ids;
+}
+
+async function requireLiveBattlePolicy(config, options = {}) {
+  const request = options.request ?? agentRequest;
+  const livePolicy = options.livePolicy ?? await request(config, "GET", "/api/war/policy");
+  if (!livePolicy?.policy) {
+    const error = new Error("The server has no mandatory battle policy. Run battle-policy set before installing automation.");
+    error.code = "BATTLE_SETUP_REQUIRED";
+    throw error;
+  }
+  return livePolicy;
+}
+
 export async function automationStatus(config, options = {}) {
   const runner = options.runner ?? runRuntimeCommand;
   if (!config.automation.runtime) return { installed: false, runtime: null, jobId: null };
   try {
     const output = runtimeList(config.automation.runtime, runner);
+    const jobPresent = output.includes(config.automation.jobId ?? AUTOMATION_NAME) || namedJobIds(output, AUTOMATION_NAME).length > 0;
+    const scriptPath = config.automation.scriptPath
+      ?? (config.automation.runtime === "hermes" ? join(resolveHermesScriptsDir(options), `${AUTOMATION_NAME}.sh`) : null);
+    const scriptPresent = config.automation.runtime !== "hermes" || existsSync(scriptPath);
     return {
-      installed: output.includes(config.automation.jobId ?? AUTOMATION_NAME) || output.includes(AUTOMATION_NAME),
+      installed: jobPresent && scriptPresent,
       runtime: config.automation.runtime,
       jobId: config.automation.jobId,
+      scriptPath,
+      scriptPresent,
       lastRunAt: config.automation.lastRunAt,
     };
   } catch (error) {
@@ -572,26 +648,61 @@ export async function installAutomation(configPath, config, runtime, flags, opti
   if (runtime !== "hermes" && runtime !== "openclaw") throw new Error("--runtime must be hermes or openclaw.");
   if (!config.agentKey || !config.battle) throw new Error("Register the wallet and set battle policy before installing automation.");
   const runner = options.runner ?? runRuntimeCommand;
+  const livePolicy = await requireLiveBattlePolicy(config, options);
+  config.battle = {
+    mode: livePolicy.policy.mode,
+    targetCastleId: livePolicy.policy.targetCastleId ?? null,
+    updatedAt: livePolicy.policy.updatedAt,
+  };
   const notification = notificationFrom(flags, config.automation.notification);
-  const existingList = runtimeList(runtime, runner);
-  if (existingList.includes(AUTOMATION_NAME)) {
-    config.automation.runtime = runtime;
-    config.automation.jobId ??= AUTOMATION_NAME;
-    config.automation.notification = notification;
-    await writeConfig(configPath, config);
-    return { installed: true, duplicate: false, existing: true, runtime, jobId: config.automation.jobId };
-  }
 
   let creation;
+  let wrapperPath = null;
   if (runtime === "hermes") {
-    const scriptsDir = options.hermesScriptsDir ?? join(homedir(), ".hermes", "scripts");
-    const wrapperPath = join(scriptsDir, `${AUTOMATION_NAME}.sh`);
+    const scriptsDir = options.hermesScriptsDir ?? resolveHermesScriptsDir(options);
+    wrapperPath = join(scriptsDir, `${AUTOMATION_NAME}.sh`);
     await mkdir(scriptsDir, { recursive: true, mode: 0o700 });
     const cliPath = fileURLToPath(import.meta.url);
     const quote = (value) => `'${String(value).replaceAll("'", `'\\''`)}'`;
     await writeFile(wrapperPath, `#!/usr/bin/env bash\nexec ${quote(process.execPath)} ${quote(cliPath)} battle-tick --quiet --config ${quote(configPath)}\n`, { mode: 0o700 });
     await chmod(wrapperPath, 0o700);
     runner("/bin/bash", [wrapperPath]);
+  }
+
+  const existingList = runtimeList(runtime, runner);
+  const removedLegacyJobIds = removeNamedJobs(runtime, LEGACY_QUEST_AUTOMATION_NAME, runner, existingList);
+  const existingJobIds = namedJobIds(existingList, AUTOMATION_NAME);
+  if (existingJobIds.length === 1) {
+    const jobId = existingJobIds[0];
+    runner(runtime === "hermes" ? "hermes" : "openclaw", ["cron", "run", jobId, ...(runtime === "openclaw" ? ["--wait"] : [])]);
+    config.automation = {
+      ...config.automation,
+      runtime,
+      jobId,
+      scriptPath: wrapperPath,
+      notification,
+      lastRunAt: new Date().toISOString(),
+    };
+    await writeConfig(configPath, config);
+    return {
+      installed: true,
+      duplicate: false,
+      existing: true,
+      runtime,
+      jobId,
+      scriptPath: wrapperPath,
+      removedLegacyJobIds,
+      testRun: "passed",
+    };
+  }
+  const removedDuplicateJobIds = existingJobIds.length > 1
+    ? removeNamedJobs(runtime, AUTOMATION_NAME, runner, existingList)
+    : [];
+  if (existingList.includes(AUTOMATION_NAME) && existingJobIds.length === 0) {
+    throw new Error(`Could not safely identify the existing ${AUTOMATION_NAME} job by ID; run hermes cron list and remove its exact ID before retrying.`);
+  }
+
+  if (runtime === "hermes") {
     creation = runner("hermes", [
       "cron", "create", "every 1m", "--no-agent", "--script", `${AUTOMATION_NAME}.sh`,
       "--deliver", hermesDelivery(notification), "--name", AUTOMATION_NAME,
@@ -606,22 +717,32 @@ export async function installAutomation(configPath, config, runtime, flags, opti
   }
   const jobId = parseJobId(creation.stdout) ?? AUTOMATION_NAME;
   runner(runtime === "hermes" ? "hermes" : "openclaw", ["cron", "run", jobId, ...(runtime === "openclaw" ? ["--wait"] : [])]);
-  config.automation = { ...config.automation, runtime, jobId, notification, lastRunAt: new Date().toISOString() };
+  config.automation = { ...config.automation, runtime, jobId, scriptPath: wrapperPath, notification, lastRunAt: new Date().toISOString() };
   await writeConfig(configPath, config);
-  return { installed: true, duplicate: false, existing: false, runtime, jobId, testRun: "passed" };
+  return {
+    installed: true,
+    duplicate: false,
+    existing: false,
+    runtime,
+    jobId,
+    scriptPath: wrapperPath,
+    removedDuplicateJobIds,
+    removedLegacyJobIds,
+    testRun: "passed",
+  };
 }
 
 export async function repairAutomation(configPath, config, runtime, flags, options = {}) {
   const runner = options.runner ?? runRuntimeCommand;
   const selectedRuntime = runtime ?? config.automation.runtime;
   if (!selectedRuntime) throw new Error("--runtime must be hermes or openclaw.");
-  try {
-    runner(selectedRuntime, ["cron", "remove", config.automation.jobId ?? AUTOMATION_NAME]);
-  } catch (error) {
-    if (!/not found|unknown|no .*job/i.test(error.message)) throw error;
-  }
+  const livePolicy = await requireLiveBattlePolicy(config, options);
+  const listed = runtimeList(selectedRuntime, runner);
+  removeNamedJobs(selectedRuntime, AUTOMATION_NAME, runner, listed);
+  removeNamedJobs(selectedRuntime, LEGACY_QUEST_AUTOMATION_NAME, runner, listed);
   config.automation.jobId = null;
-  return installAutomation(configPath, config, selectedRuntime, flags, options);
+  config.automation.scriptPath = null;
+  return installAutomation(configPath, config, selectedRuntime, flags, { ...options, livePolicy });
 }
 
 async function doctor(configPath, flags) {

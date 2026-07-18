@@ -37,7 +37,7 @@ private config or agent key into either channel.
 
 After setup and server policy creation, install one script-only job named `renkai-mandatory-battles`. An explicit failure destination is required.
 
-For Hermes, the CLI writes `~/.hermes/scripts/renkai-mandatory-battles.sh` and creates a `--no-agent` job every minute. Empty stdout is silent and no model is invoked:
+For Hermes, the CLI writes `renkai-mandatory-battles.sh` into the Gateway scripts directory and creates a `--no-agent` job every minute. It uses `$HERMES_HOME/scripts`, detects the Docker mount at `/opt/data/scripts`, and falls back to `~/.hermes/scripts` for a normal host install. Empty stdout is silent and no model is invoked:
 
 ```bash
 node scripts/renkai.mjs automation install --runtime hermes --notify-channel origin
@@ -50,3 +50,12 @@ node scripts/renkai.mjs automation install --runtime openclaw --notify-channel t
 ```
 
 The command checks UTC locally and makes no Renkai request outside the 20-minute reserve. Keep the Hermes/OpenClaw Gateway running. Use `automation status`, `automation repair`, and `doctor` after upgrades. Config v1 is read as v2 but remains `battle_setup_required` until policy, job, and test run are present.
+
+Never create `renkai-mandatory-battles` or `renkai-quests-step` through the agent's cron tool. Hermes permits duplicate names, so only the bundled installer can safely reconcile them by exact job ID. `automation install` is idempotent; `automation repair` removes every stale battle duplicate and obsolete quest-step job, rewrites the wrapper, creates exactly one battle job, and performs a test run. Both commands refuse to touch cron until `GET /api/war/policy` confirms the mandatory server policy.
+
+To recover an installation that reports `Script not found: /opt/data/scripts/...`, update this skill and run:
+
+```bash
+node scripts/renkai.mjs automation repair --runtime hermes --notify-channel origin
+node scripts/renkai.mjs doctor
+```
