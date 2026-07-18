@@ -13,7 +13,8 @@ const WAITLIST_ACCESS = {
   x: "https://x.com/renkaigame",
   discord: "https://discord.gg/fGVDhhk9t",
 };
-const AUTOMATION_NAME = "renkai-mandatory-battles";
+const AUTOMATION_NAME = "renkai-all-battles";
+const LEGACY_BATTLE_AUTOMATION_NAME = "renkai-mandatory-battles";
 const LEGACY_QUEST_AUTOMATION_NAME = "renkai-quests-step";
 const WAR_SLOT_MS = 8 * 60 * 60 * 1000;
 const WAR_RESERVE_MS = 20 * 60 * 1000;
@@ -161,8 +162,8 @@ function emptyAutomation() {
 
 function migrateConfig(config) {
   if (!config.walletAddress || !config.privateKeyPkcs8) throw new Error("Renkai config is missing wallet credentials.");
-  if (config.version !== 2) {
-    config.version = 2;
+  if (config.version !== 3) {
+    config.version = 3;
     config.battle ??= null;
     config.automation ??= emptyAutomation();
   }
@@ -174,7 +175,7 @@ function migrateConfig(config) {
 async function readConfig(configPath) {
   try {
     const parsed = JSON.parse(await readFile(configPath, "utf8"));
-    const needsMigration = parsed.version !== 2;
+    const needsMigration = parsed.version !== 3;
     const config = migrateConfig(parsed);
     if (needsMigration) await writeConfig(configPath, config);
     return config;
@@ -204,7 +205,7 @@ function safeProfile(config) {
     goal: config.profile.goal,
     battle: config.battle,
     referredBy: config.referral?.referrerPlayerId ?? null,
-    setupStatus: config.battle && config.automation.jobId && config.automation.lastRunAt ? "ready" : "battle_setup_required",
+    setupStatus: config.agentKey ? "ready" : "wallet_only",
   };
 }
 
@@ -252,7 +253,7 @@ function normalizeBattleMode(mode) {
 
 function battleBody(mode, targetCastleId) {
   const normalized = normalizeBattleMode(mode);
-  if (!BATTLE_MODES.has(normalized)) throw new Error("--battle-mode/--mode must be defend, attack-fixed, or attack-cycle.");
+  if (!BATTLE_MODES.has(normalized)) throw new Error("--mode must be defend, attack-fixed, or attack-cycle.");
   if (normalized === "attack_fixed" && !targetCastleId) throw new Error("attack-fixed requires --battle-target/--target <castle>.");
   if (normalized !== "attack_fixed" && targetCastleId) throw new Error("A battle target is valid only for attack-fixed.");
   return { mode: normalized, ...(targetCastleId ? { targetCastleId } : {}) };
@@ -326,13 +327,36 @@ async function setBattlePolicy(configPath, config, mode, targetCastleId) {
   return result;
 }
 
+async function clearBattlePolicy(configPath, config) {
+  const result = await agentRequest(config, "DELETE", "/api/war/policy", undefined, { idempotent: true });
+  config.battle = null;
+  config.updatedAt = new Date().toISOString();
+  await writeConfig(configPath, config);
+  return result;
+}
+
+async function setNextBattle(config, mode, targetCastleId) {
+  const instruction = battleBody(mode, targetCastleId);
+  const [warState, playerState] = await Promise.all([
+    agentRequest(config, "GET", "/api/war/state"),
+    agentRequest(config, "GET", "/api/player/state"),
+  ]);
+  const pledge = desiredPledge(instruction, playerState.player.castleId, warState.nextWarAt);
+  const state = await agentRequest(config, "POST", "/api/war/pledge", pledge, { idempotent: true });
+  return { scope: "next_battle", instruction, pledge, state };
+}
+
+async function clearNextBattle(config) {
+  const state = await agentRequest(config, "DELETE", "/api/war/pledge", undefined, { idempotent: true });
+  return { scope: "next_battle", instruction: null, state };
+}
+
 async function setup(configPath, flags) {
   const direction = flags.direction;
   if (!DIRECTIONS.has(direction)) throw new Error("--direction must be attacker, defender, blacksmith, or miner.");
   const resources = (flags.resources ?? "common").split(",").map((value) => value.trim().toLowerCase()).filter(Boolean);
   const goal = flags.goal ?? "balanced";
   const requestedBaseUrl = flags["base-url"] ? new URL(flags["base-url"]).origin : null;
-  const desiredBattle = battleBody(flags["battle-mode"], flags["battle-target"]);
   const desiredReferral = parseReferralInput(flags.referral);
   let config;
   let walletCreated = false;
@@ -341,11 +365,11 @@ async function setup(configPath, flags) {
   } catch (error) {
     if (!String(error.message).startsWith("No Renkai agent config")) throw error;
     config = {
-      version: 2,
+      version: 3,
       ...createWallet(),
       baseUrl: requestedBaseUrl ?? DEFAULT_BASE_URL,
       profile: { direction, resources, goal },
-      battle: { mode: desiredBattle.mode, targetCastleId: desiredBattle.targetCastleId ?? null },
+      battle: null,
       referral: desiredReferral,
       automation: emptyAutomation(),
       createdAt: new Date().toISOString(),
@@ -353,21 +377,19 @@ async function setup(configPath, flags) {
     };
     walletCreated = true;
   }
-  config.version = 2;
+  config.version = 3;
   if (config.agentKey && config.referral?.referrerPlayerId !== desiredReferral?.referrerPlayerId) {
     throw new Error("Referral attribution is immutable after agent registration. Keep the original referral choice.");
   }
   config.baseUrl = requestedBaseUrl ?? config.baseUrl ?? DEFAULT_BASE_URL;
   config.profile = { direction, resources, goal };
-  config.battle = { mode: desiredBattle.mode, targetCastleId: desiredBattle.targetCastleId ?? null };
   config.referral = desiredReferral;
   config.updatedAt = new Date().toISOString();
   await writeConfig(configPath, config);
   if (flags.offline) return { ...safeProfile(config), walletCreated, registration: "skipped" };
   try {
     const registration = config.agentKey ? { registered: true, keyStored: true } : await register(configPath, config);
-    const policy = await setBattlePolicy(configPath, config, desiredBattle.mode, desiredBattle.targetCastleId);
-    return { ...safeProfile(config), walletCreated, ...registration, policy, setupStatus: "battle_setup_required" };
+    return { ...safeProfile(config), walletCreated, ...registration, battleParticipation: config.battle ? "all_battles" : "not_participating" };
   } catch (error) {
     error.publicContext = { ...safeProfile(config), walletCreated, configSaved: true };
     throw error;
@@ -382,8 +404,8 @@ function desiredPledge(policy, playerCastleId, nextWarAt) {
 
 async function ensureBattlePledge(configPath, config, warState, nowMs, request = agentRequest) {
   if (!warState.policy) {
-    const error = new Error("A mandatory battle policy is not configured. Run battle-policy set.");
-    error.code = "BATTLE_SETUP_REQUIRED";
+    const error = new Error("No all-battles policy is configured.");
+    error.code = "NO_BATTLE_INSTRUCTION";
     throw error;
   }
   const playerState = await request(config, "GET", "/api/player/state");
@@ -401,7 +423,7 @@ async function ensureBattlePledge(configPath, config, warState, nowMs, request =
     config.automation.lastAlertedWindowId = warState.nextWindowId;
     config.automation.lastRunAt = new Date(nowMs).toISOString();
     await writeConfig(configPath, config);
-    const error = new Error(`Mandatory Renkai pledge was not installed before lock for ${warState.nextWindowId}.`);
+    const error = new Error(`The opted-in all-battles pledge was not installed before lock for ${warState.nextWindowId}.`);
     error.code = "BATTLE_PLEDGE_MISSED";
     throw error;
   }
@@ -437,7 +459,7 @@ export async function battleTick(configPath, config, options = {}) {
       config.automation.lastAlertedWindowId = localWindow.windowId;
       config.automation.lastRunAt = new Date(nowMs).toISOString();
       await writeConfig(configPath, config);
-      const missed = new Error(`Mandatory Renkai pledge could not be verified before lock for ${localWindow.windowId}: ${error.message}`);
+      const missed = new Error(`The opted-in all-battles pledge could not be verified before lock for ${localWindow.windowId}: ${error.message}`);
       missed.code = "BATTLE_PLEDGE_MISSED";
       throw missed;
     }
@@ -446,17 +468,18 @@ export async function battleTick(configPath, config, options = {}) {
   if (nowMs < reserveAt || nowMs >= Date.parse(warState.nextWarAt)) {
     return { action: "outside_reserve", nextReserveAt: new Date(reserveAt).toISOString() };
   }
+  if (!warState.policy) {
+    return {
+      action: warState.pledge ? "next_battle_ready" : "no_battle_instruction",
+      windowId: warState.nextWindowId,
+      pledge: warState.pledge ?? null,
+      nextWarAt: warState.nextWarAt,
+    };
+  }
   try {
     return await ensureBattlePledge(configPath, config, warState, nowMs, request);
   } catch (error) {
     if (nowMs < Date.parse(warState.pledgeLockedAt)) {
-      if (error.code === "BATTLE_SETUP_REQUIRED") {
-        if (config.automation.lastAlertedWindowId === warState.nextWindowId) return { action: "already_alerted", windowId: warState.nextWindowId };
-        config.automation.lastAlertedWindowId = warState.nextWindowId;
-        config.automation.lastRunAt = new Date(nowMs).toISOString();
-        await writeConfig(configPath, config);
-        throw error;
-      }
       config.automation.lastRunAt = new Date(nowMs).toISOString();
       await writeConfig(configPath, config);
       return { action: "retry", windowId: warState.nextWindowId, retryAt: warState.pledgeLockedAt, reason: error.code ?? "TEMPORARY_ERROR" };
@@ -468,7 +491,7 @@ export async function battleTick(configPath, config, options = {}) {
     config.automation.lastAlertedWindowId = warState.nextWindowId;
     config.automation.lastRunAt = new Date(nowMs).toISOString();
     await writeConfig(configPath, config);
-    const missed = new Error(`Mandatory Renkai pledge could not be verified before lock for ${warState.nextWindowId}: ${error.message}`);
+    const missed = new Error(`The opted-in all-battles pledge could not be verified before lock for ${warState.nextWindowId}: ${error.message}`);
     missed.code = "BATTLE_PLEDGE_MISSED";
     throw missed;
   }
@@ -477,10 +500,13 @@ export async function battleTick(configPath, config, options = {}) {
 async function takeStep(configPath, config) {
   const nowMs = Date.now();
   const warState = await agentRequest(config, "GET", "/api/war/state");
-  if (!warState.policy) return { action: "battle_setup_required", reason: "missing_policy" };
-  if (nowMs >= Date.parse(warState.nextWarAt) - WAR_RESERVE_MS && nowMs < Date.parse(warState.nextWarAt)) {
+  const inReserve = nowMs >= Date.parse(warState.nextWarAt) - WAR_RESERVE_MS && nowMs < Date.parse(warState.nextWarAt);
+  if (warState.policy && inReserve) {
     const battle = await ensureBattlePledge(configPath, config, warState, nowMs);
-    return { ...battle, action: battle.action === "retry" ? "wait" : battle.action, reason: "mandatory_battle_reserve", retryAt: warState.nextWarAt };
+    return { ...battle, action: battle.action === "retry" ? "wait" : battle.action, reason: "all_battles_reserve", retryAt: warState.nextWarAt };
+  }
+  if (warState.pledge && inReserve) {
+    return { action: "wait", reason: "next_battle_reserved", pledge: warState.pledge, retryAt: warState.nextWarAt };
   }
   const state = await agentRequest(config, "GET", "/api/player/state");
   const player = state.player;
@@ -615,8 +641,8 @@ async function requireLiveBattlePolicy(config, options = {}) {
   const request = options.request ?? agentRequest;
   const livePolicy = options.livePolicy ?? await request(config, "GET", "/api/war/policy");
   if (!livePolicy?.policy) {
-    const error = new Error("The server has no mandatory battle policy. Run battle-policy set before installing automation.");
-    error.code = "BATTLE_SETUP_REQUIRED";
+    const error = new Error("The server has no all-battles policy. Set one before installing battle automation.");
+    error.code = "NO_BATTLE_INSTRUCTION";
     throw error;
   }
   return livePolicy;
@@ -670,7 +696,10 @@ export async function installAutomation(configPath, config, runtime, flags, opti
   }
 
   const existingList = runtimeList(runtime, runner);
-  const removedLegacyJobIds = removeNamedJobs(runtime, LEGACY_QUEST_AUTOMATION_NAME, runner, existingList);
+  const removedLegacyJobIds = [
+    ...removeNamedJobs(runtime, LEGACY_BATTLE_AUTOMATION_NAME, runner, existingList),
+    ...removeNamedJobs(runtime, LEGACY_QUEST_AUTOMATION_NAME, runner, existingList),
+  ];
   const existingJobIds = namedJobIds(existingList, AUTOMATION_NAME);
   if (existingJobIds.length === 1) {
     const jobId = existingJobIds[0];
@@ -739,10 +768,27 @@ export async function repairAutomation(configPath, config, runtime, flags, optio
   const livePolicy = await requireLiveBattlePolicy(config, options);
   const listed = runtimeList(selectedRuntime, runner);
   removeNamedJobs(selectedRuntime, AUTOMATION_NAME, runner, listed);
+  removeNamedJobs(selectedRuntime, LEGACY_BATTLE_AUTOMATION_NAME, runner, listed);
   removeNamedJobs(selectedRuntime, LEGACY_QUEST_AUTOMATION_NAME, runner, listed);
   config.automation.jobId = null;
   config.automation.scriptPath = null;
   return installAutomation(configPath, config, selectedRuntime, flags, { ...options, livePolicy });
+}
+
+export async function uninstallAutomation(configPath, config, runtime, options = {}) {
+  const runner = options.runner ?? runRuntimeCommand;
+  const selectedRuntime = runtime ?? config.automation.runtime;
+  const removedJobIds = [];
+  if (selectedRuntime) {
+    if (selectedRuntime !== "hermes" && selectedRuntime !== "openclaw") throw new Error("--runtime must be hermes or openclaw.");
+    const listed = runtimeList(selectedRuntime, runner);
+    removedJobIds.push(...removeNamedJobs(selectedRuntime, AUTOMATION_NAME, runner, listed));
+    removedJobIds.push(...removeNamedJobs(selectedRuntime, LEGACY_BATTLE_AUTOMATION_NAME, runner, listed));
+    removedJobIds.push(...removeNamedJobs(selectedRuntime, LEGACY_QUEST_AUTOMATION_NAME, runner, listed));
+  }
+  config.automation = emptyAutomation();
+  await writeConfig(configPath, config);
+  return { installed: false, runtime: selectedRuntime ?? null, removedJobIds };
 }
 
 async function doctor(configPath, flags) {
@@ -763,7 +809,10 @@ async function doctor(configPath, flags) {
     }
   }
   const scheduler = config ? await automationStatus(config) : { installed: false, runtime: null, jobId: null };
-  const ready = Boolean(config?.agentKey && policy?.policy && scheduler.installed && config.automation.lastRunAt);
+  const allBattlesReady = Boolean(policy?.policy && scheduler.installed && config?.automation.lastRunAt);
+  const battleParticipation = policy?.policy
+    ? allBattlesReady ? "all_battles_ready" : "all_battles_needs_automation"
+    : war?.pledge ? "next_battle_only" : "not_participating";
   return {
     baseUrl,
     health,
@@ -773,8 +822,9 @@ async function doctor(configPath, flags) {
     scheduler,
     lastRunAt: config?.automation.lastRunAt ?? null,
     nextWarAt: war?.nextWarAt ?? battleWindowContext().scheduledAt,
-    mandatoryBattleReady: ready,
-    setupStatus: ready ? "ready" : "battle_setup_required",
+    battleParticipation,
+    allBattlesReady,
+    setupStatus: config?.agentKey ? "ready" : config ? "wallet_only" : "not_configured",
   };
 }
 
@@ -784,12 +834,14 @@ function print(value, quiet = false) {
 
 function help() {
   return {
-    usage: "renkai.mjs <doctor|setup|register|profile|state|quests|step|battle-policy|battle-tick|automation> [subcommand] [options]",
+    usage: "renkai.mjs <doctor|setup|register|profile|state|quests|step|battle-next|battle-policy|battle-tick|automation> [subcommand] [options]",
     examples: [
-      "renkai.mjs setup --direction miner --resources iron,coal --battle-mode defend --referral https://app.renkai.xyz/?ref=player_123",
+      "renkai.mjs setup --direction miner --resources iron,coal --referral https://app.renkai.xyz/?ref=player_123",
+      "renkai.mjs battle-next set --mode defend",
       "renkai.mjs battle-policy set --mode attack-fixed --target thornmere",
+      "renkai.mjs battle-policy clear",
       "renkai.mjs automation install --runtime hermes --notify-channel origin",
-      "renkai.mjs automation repair --runtime openclaw --notify-channel telegram --notify-to 123456",
+      "renkai.mjs automation uninstall --runtime hermes",
     ],
     referral: "Pass --referral <https://app.renkai.xyz/...?...ref=player_...>; use --referral none only when there is no referrer.",
   };
@@ -807,10 +859,14 @@ export async function main(argv = process.argv.slice(2)) {
   if (command === "state") return print(await agentRequest(config, "GET", "/api/player/state"));
   if (command === "quests") return print(await agentRequest(config, "GET", "/api/quests"));
   if (command === "step") return print(await takeStep(configPath, config));
+  if (command === "battle-next" && subcommand === "show") return print(await agentRequest(config, "GET", "/api/war/state"));
+  if (command === "battle-next" && subcommand === "set") return print(await setNextBattle(config, flags.mode, flags.target));
+  if (command === "battle-next" && subcommand === "clear") return print(await clearNextBattle(config));
   if (command === "battle-policy" && subcommand === "show") return print(await agentRequest(config, "GET", "/api/war/policy"));
   if (command === "battle-policy" && subcommand === "set") {
     return print(await setBattlePolicy(configPath, config, flags.mode, flags.target));
   }
+  if (command === "battle-policy" && subcommand === "clear") return print(await clearBattlePolicy(configPath, config));
   if (command === "battle-tick") return print(await battleTick(configPath, config), flags.quiet);
   if (command === "automation" && subcommand === "status") return print(await automationStatus(config));
   if (command === "automation" && subcommand === "install") {
@@ -818,6 +874,9 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (command === "automation" && subcommand === "repair") {
     return print(await repairAutomation(configPath, config, flags.runtime, flags));
+  }
+  if (command === "automation" && subcommand === "uninstall") {
+    return print(await uninstallAutomation(configPath, config, flags.runtime));
   }
   throw new Error(`Unknown command: ${command}${subcommand ? ` ${subcommand}` : ""}`);
 }

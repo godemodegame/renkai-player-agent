@@ -22,6 +22,7 @@ import {
   registrationRequestBody,
   resolveHermesScriptsDir,
   signRequest,
+  uninstallAutomation,
 } from "./renkai.mjs";
 
 function base58Decode(value) {
@@ -87,7 +88,7 @@ test("offline setup creates a private reusable config without printing secrets",
   try {
     await main([
       "setup", "--config", configPath, "--direction", "miner", "--resources", "iron,coal",
-      "--battle-mode", "defend", "--referral", "https://app.renkai.xyz/?ref=player_ref_123", "--offline",
+      "--referral", "https://app.renkai.xyz/?ref=player_ref_123", "--offline",
     ]);
   } finally {
     process.stdout.write = originalWrite;
@@ -95,8 +96,8 @@ test("offline setup creates a private reusable config without printing secrets",
   const stored = JSON.parse(await readFile(configPath, "utf8"));
   const output = writes.join("");
   assert.equal(stored.profile.direction, "miner");
-  assert.equal(stored.version, 2);
-  assert.equal(stored.battle.mode, "defend");
+  assert.equal(stored.version, 3);
+  assert.equal(stored.battle, null);
   assert.deepEqual(stored.referral, { referrerPlayerId: "player_ref_123", providedAs: "link" });
   assert.ok(stored.privateKeyPkcs8);
   assert.equal(output.includes(stored.privateKeyPkcs8), false);
@@ -165,7 +166,7 @@ test("waitlist denial exposes the public agent wallet and official access links 
   }
 });
 
-test("version 1 config migrates to version 2 and requires battle setup", async () => {
+test("version 1 config migrates to optional-battle version 3", async () => {
   const directory = await mkdtemp(join(tmpdir(), "renkai-v1-test-"));
   const configPath = join(directory, "agent.json");
   await writeFile(configPath, JSON.stringify({
@@ -184,9 +185,9 @@ test("version 1 config migrates to version 2 and requires battle setup", async (
   }
   const migrated = JSON.parse(await readFile(configPath, "utf8"));
   const output = JSON.parse(writes.join(""));
-  assert.equal(migrated.version, 2);
+  assert.equal(migrated.version, 3);
   assert.equal(migrated.battle, null);
-  assert.equal(output.setupStatus, "battle_setup_required");
+  assert.equal(output.setupStatus, "wallet_only");
 });
 
 test("battle tick performs no network request outside the local 20-minute reserve", async () => {
@@ -210,6 +211,80 @@ test("battle tick performs no network request outside the local 20-minute reserv
   });
   assert.equal(result.action, "outside_reserve");
   assert.equal(calls, 0);
+});
+
+test("battle tick treats no policy and no pledge as a valid opt-out", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "renkai-battle-opt-out-test-"));
+  const configPath = join(directory, "agent.json");
+  const config = {
+    version: 3,
+    ...createWallet(),
+    baseUrl: "https://example.invalid",
+    agentKey: "secret",
+    profile: { direction: "miner", resources: ["common"], goal: "balanced" },
+    battle: null,
+    automation: { runtime: null, jobId: null, lastRunAt: null, lastPledgedWindowId: null, lastAlertedWindowId: null, notification: null },
+  };
+  const result = await battleTick(configPath, config, {
+    nowMs: Date.UTC(2026, 6, 18, 7, 45),
+    force: true,
+    warState: {
+      nextWindowId: "war_optional",
+      nextWarAt: "2026-07-18T08:00:00.000Z",
+      pledgeLockedAt: "2026-07-18T07:55:00.000Z",
+      policy: null,
+      pledge: null,
+    },
+  });
+  assert.deepEqual(result, {
+    action: "no_battle_instruction",
+    windowId: "war_optional",
+    pledge: null,
+    nextWarAt: "2026-07-18T08:00:00.000Z",
+  });
+});
+
+test("battle-next creates and clears only a one-window pledge", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "renkai-battle-next-test-"));
+  const configPath = join(directory, "agent.json");
+  const config = {
+    version: 3,
+    ...createWallet(),
+    baseUrl: "https://example.invalid",
+    agentKey: "secret",
+    profile: { direction: "miner", resources: ["common"], goal: "balanced" },
+    battle: null,
+    automation: { runtime: null, jobId: null, lastRunAt: null, lastPledgedWindowId: null, lastAlertedWindowId: null, notification: null },
+  };
+  await writeFile(configPath, JSON.stringify(config));
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  const originalWrite = process.stdout.write;
+  process.stdout.write = () => true;
+  globalThis.fetch = async (url, options = {}) => {
+    const path = new URL(url).pathname;
+    requests.push({ method: options.method ?? "GET", path, body: options.body ? JSON.parse(String(options.body)) : null });
+    const data = path === "/api/war/state"
+      ? { nextWindowId: "war_next", nextWarAt: "2026-07-18T08:00:00.000Z", pledgeLockedAt: "2026-07-18T07:55:00.000Z", policy: null, pledge: null }
+      : path === "/api/player/state"
+        ? { player: { castleId: "ashkeep" } }
+        : { pledge: null, policy: null };
+    return new Response(JSON.stringify({ data }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    await main(["battle-next", "set", "--mode", "attack-cycle", "--config", configPath]);
+    await main(["battle-next", "clear", "--config", configPath]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalWrite;
+  }
+  const pledge = requests.find((request) => request.method === "POST" && request.path === "/api/war/pledge");
+  assert.equal(pledge.body.role, "attack");
+  assert.notEqual(pledge.body.targetCastleId, "ashkeep");
+  assert.equal(requests.some((request) => request.method === "DELETE" && request.path === "/api/war/pledge"), true);
+  const stored = JSON.parse(await readFile(configPath, "utf8"));
+  assert.equal(stored.battle, null);
+  assert.equal(stored.automation.jobId, null);
 });
 
 test("attack cycle is deterministic and advances with stable eight-hour slots", () => {
@@ -279,7 +354,7 @@ test("battle tick pledges during reserve and emits only one missed-window error"
   assert.equal(suppressedOffline.action, "already_alerted");
 });
 
-test("onboarded scheduler pledges three consecutive wars and uses a changed policy next", async () => {
+test("explicit all-battles scheduler pledges three consecutive wars and uses a changed policy next", async () => {
   const directory = await mkdtemp(join(tmpdir(), "renkai-three-wars-test-"));
   const configPath = join(directory, "agent.json");
   const config = {
@@ -362,7 +437,7 @@ test("Hermes and OpenClaw adapters install exact script-only jobs without duplic
       }
       if (args[0] === "cron" && args[1] === "create") {
         const id = runtime === "hermes" ? "a1b2c3d4e5f6" : "openclaw12345678";
-        jobs.push({ id, name: "renkai-mandatory-battles" });
+        jobs.push({ id, name: "renkai-all-battles" });
         return { stdout: JSON.stringify({ id }) };
       }
       return { stdout: "ok" };
@@ -446,7 +521,7 @@ test("Hermes install repairs duplicate battle jobs, removes legacy quest jobs, a
       return { stdout: "removed" };
     }
     if (args[0] === "cron" && args[1] === "create") {
-      jobs.push({ id: "abc123def456", name: "renkai-mandatory-battles" });
+      jobs.push({ id: "abc123def456", name: "renkai-all-battles" });
       return { stdout: JSON.stringify({ id: "abc123def456" }) };
     }
     return { stdout: "ok" };
@@ -457,8 +532,8 @@ test("Hermes install repairs duplicate battle jobs, removes legacy quest jobs, a
     request: async () => ({ policy: { mode: "defend", targetCastleId: null, updatedAt: "2026-07-18T00:00:00.000Z" } }),
   });
   assert.deepEqual(new Set(removed), new Set(["8dbaa619c480", "d7dcda121c84", "e81c471fbf75", "0556ebf1ded1"]));
-  assert.deepEqual(jobs, [{ id: "abc123def456", name: "renkai-mandatory-battles" }]);
-  assert.equal(result.scriptPath, join(scriptsDir, "renkai-mandatory-battles.sh"));
+  assert.deepEqual(jobs, [{ id: "abc123def456", name: "renkai-all-battles" }]);
+  assert.equal(result.scriptPath, join(scriptsDir, "renkai-all-battles.sh"));
   assert.match(await readFile(result.scriptPath, "utf8"), /battle-tick --quiet/);
 });
 
@@ -480,7 +555,37 @@ test("automation creates no cron job until the server confirms battle policy", a
       runner: (binary, args) => { calls.push({ binary, args }); return { stdout: "" }; },
       request: async () => ({ policy: null }),
     }),
-    { code: "BATTLE_SETUP_REQUIRED" },
+    { code: "NO_BATTLE_INSTRUCTION" },
   );
   assert.deepEqual(calls, []);
+});
+
+test("automation uninstall removes optional battle and obsolete quest jobs", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "renkai-uninstall-test-"));
+  const configPath = join(directory, "agent.json");
+  const config = {
+    version: 3,
+    ...createWallet(),
+    baseUrl: "https://example.invalid",
+    agentKey: "secret",
+    profile: { direction: "defender", resources: ["common"], goal: "balanced" },
+    battle: null,
+    automation: { runtime: "hermes", jobId: "8dbaa619c480", scriptPath: "/opt/data/scripts/renkai-mandatory-battles.sh", lastRunAt: null, lastPledgedWindowId: null, lastAlertedWindowId: null, notification: null },
+  };
+  await writeFile(configPath, JSON.stringify(config));
+  const jobs = [
+    { id: "8dbaa619c480", name: "renkai-mandatory-battles" },
+    { id: "0556ebf1ded1", name: "renkai-quests-step" },
+  ];
+  const removed = [];
+  const runner = (_binary, args) => {
+    if (args[1] === "list") return { stdout: jobs.map((job) => `  ${job.id} enabled\n    Name:      ${job.name}`).join("\n\n") };
+    if (args[1] === "remove") removed.push(args[2]);
+    return { stdout: "ok" };
+  };
+  const result = await uninstallAutomation(configPath, config, "hermes", { runner });
+  assert.deepEqual(new Set(result.removedJobIds), new Set(["8dbaa619c480", "0556ebf1ded1"]));
+  assert.deepEqual(new Set(removed), new Set(["8dbaa619c480", "0556ebf1ded1"]));
+  assert.equal(config.automation.runtime, null);
+  assert.equal(config.automation.jobId, null);
 });

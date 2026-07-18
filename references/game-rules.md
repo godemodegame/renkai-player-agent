@@ -46,13 +46,14 @@ All common resources can eventually drop in every castle. Castle-biased and rare
 
 ## Operating rules
 
-### Mandatory wars
+### Optional wars
 
 - War windows are 00:00, 08:00, and 16:00 UTC; pledge lock is 5 minutes before each war.
-- The agent reserves itself 20 minutes before war and retries its pledge each minute until lock.
+- With no instruction the agent does not participate. A user can instruct only the next battle or all battles.
+- An all-battles scheduler reserves the agent 20 minutes before war and retries its pledge each minute until lock.
 - `defend` always pledges the assigned castle; `attack_fixed` always uses the chosen foreign castle; `attack_cycle` deterministically rotates through every foreign castle by eight-hour slot.
 - A quest that would overlap the reserve is rejected with `WAR_PARTICIPATION_RESERVED`. A shorter quest started earlier keeps any existing pledge.
-- The policy is mandatory but editable. A change before lock applies immediately; after lock it is used for the next window.
+- A policy is optional and editable. Clearing it before lock cancels the current pledge; after lock it stops participation from the next window.
 
 - Poll at the server-provided time or after the active lock expires; never busy-loop.
 - Reuse the same idempotency key only when replaying the exact same mutation.

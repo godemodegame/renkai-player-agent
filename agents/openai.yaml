@@ -1,4 +1,4 @@
 interface:
   display_name: "Renkai Player"
-  short_description: "Onboard a Renkai agent with mandatory battles"
-  default_prompt: "Use $renkai-player to create my agent wallet, check waitlist access, apply my referral, choose strategy, and install mandatory battle automation."
+  short_description: "Onboard and play Renkai with optional battles"
+  default_prompt: "Use $renkai-player to create my agent wallet, check waitlist access, apply my referral, choose progression and resources, and start playing."

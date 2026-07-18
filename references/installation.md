@@ -33,11 +33,11 @@ wallet plus `https://discord.gg/fGVDhhk9t` and `https://x.com/renkaigame`.
 Approval is required before play; rerun `register` afterward. Never copy the
 private config or agent key into either channel.
 
-## Mandatory battle scheduler
+## Optional all-battles scheduler
 
-After setup and server policy creation, install one script-only job named `renkai-mandatory-battles`. An explicit failure destination is required.
+Do not install a battle scheduler during onboarding. If the user later gives an instruction for all battles, create the server policy and install one script-only job named `renkai-all-battles`. An explicit failure destination is required.
 
-For Hermes, the CLI writes `renkai-mandatory-battles.sh` into the Gateway scripts directory and creates a `--no-agent` job every minute. It uses `$HERMES_HOME/scripts`, detects the Docker mount at `/opt/data/scripts`, and falls back to `~/.hermes/scripts` for a normal host install. Empty stdout is silent and no model is invoked:
+For Hermes, the CLI writes `renkai-all-battles.sh` into the Gateway scripts directory and creates a `--no-agent` job every minute. It uses `$HERMES_HOME/scripts`, detects the Docker mount at `/opt/data/scripts`, and falls back to `~/.hermes/scripts` for a normal host install. Empty stdout is silent and no model is invoked:
 
 ```bash
 node scripts/renkai.mjs automation install --runtime hermes --notify-channel origin
@@ -49,11 +49,11 @@ For OpenClaw, it creates a command-payload cron with an exact JSON argv and UTC 
 node scripts/renkai.mjs automation install --runtime openclaw --notify-channel telegram --notify-to <chat-id>
 ```
 
-The command checks UTC locally and makes no Renkai request outside the 20-minute reserve. Keep the Hermes/OpenClaw Gateway running. Use `automation status`, `automation repair`, and `doctor` after upgrades. Config v1 is read as v2 but remains `battle_setup_required` until policy, job, and test run are present.
+The command checks UTC locally and makes no Renkai request outside the 20-minute reserve. Keep the Hermes/OpenClaw Gateway running while an all-battles policy is active. Use `automation status`, `automation repair`, and `doctor` after upgrades. Configs v1/v2 migrate to v3; lack of battle policy is a normal ready state.
 
-Never create `renkai-mandatory-battles` or `renkai-quests-step` through the agent's cron tool. Hermes permits duplicate names, so only the bundled installer can safely reconcile them by exact job ID. `automation install` is idempotent; `automation repair` removes every stale battle duplicate and obsolete quest-step job, rewrites the wrapper, creates exactly one battle job, and performs a test run. Both commands refuse to touch cron until `GET /api/war/policy` confirms the mandatory server policy.
+Never create `renkai-all-battles`, legacy `renkai-mandatory-battles`, or `renkai-quests-step` through the agent's cron tool. Hermes permits duplicate names, so only the bundled CLI can safely reconcile them by exact job ID. `automation install` is idempotent; `automation repair` removes every stale/legacy duplicate, rewrites the wrapper, creates exactly one battle job, and performs a test run. Both commands require an explicit all-battles server policy. `automation uninstall` removes the jobs when the user stops participating.
 
-To recover an installation that reports `Script not found: /opt/data/scripts/...`, update this skill and run:
+To recover an opted-in installation that reports `Script not found: /opt/data/scripts/...`, update this skill and run:
 
 ```bash
 node scripts/renkai.mjs automation repair --runtime hermes --notify-channel origin
