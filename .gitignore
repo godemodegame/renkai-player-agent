@@ -1,0 +1,6 @@
+.DS_Store
+.env
+.env.*
+agent.json
+node_modules/
+*.tmp
