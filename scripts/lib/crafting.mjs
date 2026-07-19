@@ -79,7 +79,7 @@ function isRecipe(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value)
     && isString(value.id)
     && isNullableString(value.name)
-    && Number.isInteger(value.tier) && value.tier > 0
+    && isString(value.tier)
     && isString(value.slot)
     && isString(value.requiredStation)
     && Number.isInteger(value.requiredPlayerLevel) && value.requiredPlayerLevel >= 0

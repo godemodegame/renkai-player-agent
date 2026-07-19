@@ -87,7 +87,7 @@ test("runs notification status inventory and crafting through the real CLI", asy
       return send(response, { data: { recipes: [{
         id: "recipe_1",
         name: "Iron Knife",
-        tier: 1,
+        tier: "T1",
         slot: "weapon",
         requiredStation: "forge",
         requiredPlayerLevel: 5,

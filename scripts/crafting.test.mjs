@@ -50,7 +50,7 @@ test("maps every crafting subcommand to its canonical route", async () => {
   const recipe = {
     id: "recipe_iron_sword",
     name: "Iron Sword",
-    tier: 1,
+    tier: "T1",
     slot: "weapon",
     requiredStation: "forge",
     requiredPlayerLevel: 5,
