@@ -1,0 +1,199 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  agentRequest,
+  agentRequestWithMetadata,
+  createWallet,
+  parseResponse,
+} from "./lib/api.mjs";
+import {
+  runCraftingCommand,
+} from "./lib/crafting.mjs";
+
+function testConfig() {
+  return {
+    ...createWallet(),
+    baseUrl: "https://crafting.example.test",
+    agentKey: "agent-key",
+  };
+}
+
+function jsonResponse(payload, status = 200) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+async function withFetch(handler, action) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = handler;
+  try {
+    return await action();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+test("maps every crafting subcommand to its canonical route", async () => {
+  const config = testConfig();
+  const calls = [];
+  const recipe = {
+    id: "recipe_iron_sword",
+    name: "Iron Sword",
+    tier: 1,
+    slot: "weapon",
+    requiredStation: "forge",
+    requiredPlayerLevel: 5,
+    requiredCastleId: "ashkeep",
+    requiredBranch: "fighter",
+    durationSeconds: 90,
+    gearPower: 12,
+    bonuses: { strength: 2 },
+    costGold: 50,
+    costResources: { iron: 3 },
+  };
+  const readyAt = "2099-01-01T00:01:30.000Z";
+  const jobId = "craft_job_123";
+  const handler = async (url, options = {}) => {
+    const path = new URL(url).pathname;
+    const method = options.method ?? "GET";
+    const body = options.body ? JSON.parse(String(options.body)) : undefined;
+    calls.push({ method, path, body, headers: options.headers ?? {} });
+    if (path === "/api/crafting/recipes") return jsonResponse({ data: { recipes: [recipe] } });
+    if (path === "/api/crafting/jobs") {
+      return jsonResponse({
+        serverTime: "2099-01-01T00:00:00.000Z",
+        nextRecommendedPollAt: readyAt,
+        data: { jobs: [{ craftingJobId: jobId, recipeId: recipe.id, status: "in_progress", readyAt }] },
+      });
+    }
+    if (path === "/api/crafting/request") return jsonResponse({ data: { craftingJobId: jobId, readyAt } });
+    if (path === "/api/crafting/cancel") return jsonResponse({ data: { craftingJobId: jobId, status: "cancelled" } });
+    if (path === "/api/crafting/claim") {
+      return jsonResponse({ data: { craft: { gearItemId: "gear_123", mintStatus: "failed_recoverable", mintError: "RPC unavailable" } } });
+    }
+    if (path === "/api/crafting/retry-mint") {
+      return jsonResponse({ data: { craft: { gearItemId: "gear_123", mintStatus: "complete", mintAddress: "mint_123" } } });
+    }
+    return jsonResponse({ error: { code: "NOT_FOUND", message: path } }, 404);
+  };
+
+  await withFetch(handler, async () => {
+    const recipes = await runCraftingCommand(config, "recipes", {});
+    assert.deepEqual(recipes, { recipes: [recipe] });
+
+    const list = await runCraftingCommand(config, "list", {});
+    assert.deepEqual(list, {
+      jobs: [{ craftingJobId: jobId, recipeId: recipe.id, status: "in_progress", readyAt }],
+      nextRecommendedPollAt: readyAt,
+    });
+
+    const started = await runCraftingCommand(config, "start", { recipe: recipe.id, confirm: recipe.id });
+    assert.deepEqual(started, { craftingJobId: jobId, readyAt, nextRecommendedPollAt: readyAt });
+
+    const cancelled = await runCraftingCommand(config, "cancel", { job: jobId, confirm: jobId });
+    assert.deepEqual(cancelled, { craftingJobId: jobId, status: "cancelled" });
+
+    const failedClaim = await runCraftingCommand(config, "claim", { job: jobId, confirm: jobId });
+    assert.deepEqual(failedClaim, { craft: { gearItemId: "gear_123", mintStatus: "failed_recoverable", mintError: "RPC unavailable" } });
+
+    const retried = await runCraftingCommand(config, "retry-mint", { job: jobId, confirm: jobId });
+    assert.deepEqual(retried, { craft: { gearItemId: "gear_123", mintStatus: "complete", mintAddress: "mint_123" } });
+  });
+
+  assert.deepEqual(calls.map(({ method, path, body }) => ({ method, path, body })), [
+    { method: "GET", path: "/api/crafting/recipes", body: undefined },
+    { method: "GET", path: "/api/crafting/jobs", body: undefined },
+    { method: "POST", path: "/api/crafting/request", body: { recipeId: recipe.id } },
+    { method: "POST", path: "/api/crafting/cancel", body: { craftingJobId: jobId } },
+    { method: "POST", path: "/api/crafting/claim", body: { craftingJobId: jobId } },
+    { method: "POST", path: "/api/crafting/retry-mint", body: { craftingJobId: jobId } },
+  ]);
+  for (const call of calls.filter(({ method }) => method === "POST")) {
+    assert.equal(typeof call.headers["X-Agent-Wallet"], "string");
+    assert.equal(call.headers["X-Agent-Key"], config.agentKey);
+    assert.equal(call.headers["X-Idempotency-Key"]?.length > 0, true);
+  }
+});
+
+test("preserves crafting polling hints and keeps legacy responses data-only", async () => {
+  const config = testConfig();
+  const readyAt = "2099-01-01T00:05:00.000Z";
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const path = new URL(url).pathname;
+    if (path === "/api/crafting/jobs") {
+      return jsonResponse({ data: { jobs: [] }, nextRecommendedPollAt: readyAt });
+    }
+    if (path === "/api/empty") return jsonResponse({ data: { stable: true }, serverTime: "2099-01-01T00:00:00.000Z" });
+    return jsonResponse({ data: { stable: true }, nextRecommendedPollAt: readyAt });
+  };
+  try {
+    assert.deepEqual(await runCraftingCommand(config, "list", {}), { jobs: [], nextRecommendedPollAt: readyAt });
+    assert.deepEqual(await agentRequest(config, "GET", "/api/empty"), { stable: true });
+    assert.deepEqual(await agentRequestWithMetadata(config, "GET", "/api/empty"), {
+      data: { stable: true },
+      nextRecommendedPollAt: null,
+    });
+    const raw = new Response(JSON.stringify({ data: { stable: true }, nextRecommendedPollAt: readyAt }), { status: 200 });
+    assert.deepEqual(await parseResponse(raw, { metadata: true }), { data: { stable: true }, nextRecommendedPollAt: readyAt });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const noHint = await runCraftingCommand(config, "list", {}, {
+    requestWithMetadata: async () => ({ data: { jobs: [{ craftingJobId: "done", status: "complete" }] } }),
+  });
+  assert.deepEqual(noHint, { jobs: [{ craftingJobId: "done", status: "complete" }], nextRecommendedPollAt: null });
+});
+
+test("requires target-matching confirmation before every crafting mutation", async () => {
+  const config = testConfig();
+  let calls = 0;
+  const request = async () => {
+    calls += 1;
+    throw new Error("request should not run");
+  };
+  const mutations = [
+    ["start", { recipe: "recipe_1" }, "crafting start requires --confirm <recipeId> exactly matching --recipe."],
+    ["start", { recipe: "recipe_1", confirm: "recipe_2" }, "crafting start requires --confirm <recipeId> exactly matching --recipe."],
+    ["cancel", { job: "job_1" }, "crafting cancel requires --confirm <craftingJobId> exactly matching --job."],
+    ["cancel", { job: "job_1", confirm: "job_2" }, "crafting cancel requires --confirm <craftingJobId> exactly matching --job."],
+    ["claim", { job: "job_1" }, "crafting claim requires --confirm <craftingJobId> exactly matching --job."],
+    ["claim", { job: "job_1", confirm: "job_2" }, "crafting claim requires --confirm <craftingJobId> exactly matching --job."],
+    ["retry-mint", { job: "job_1" }, "crafting retry-mint requires --confirm <craftingJobId> exactly matching --job."],
+    ["retry-mint", { job: "job_1", confirm: "job_2" }, "crafting retry-mint requires --confirm <craftingJobId> exactly matching --job."],
+  ];
+  for (const [subcommand, flags, message] of mutations) {
+    await assert.rejects(
+      runCraftingCommand(config, subcommand, flags, { request }),
+      (error) => error instanceof Error && error.message === message,
+    );
+  }
+  assert.equal(calls, 0);
+
+  await assert.rejects(runCraftingCommand(config, "start", {}, { request }), /crafting start requires --recipe <recipeId>\./);
+  await assert.rejects(runCraftingCommand(config, "cancel", {}, { request }), /crafting cancel requires --job <craftingJobId>\./);
+  await assert.rejects(runCraftingCommand(config, "claim", {}, { request }), /crafting claim requires --job <craftingJobId>\./);
+  await assert.rejects(runCraftingCommand(config, "retry-mint", {}, { request }), /crafting retry-mint requires --job <craftingJobId>\./);
+  assert.equal(calls, 0);
+});
+
+test("preserves structured retryAt errors from claim and retry-mint", async () => {
+  const config = testConfig();
+  const retryAt = "2099-01-01T00:10:00.000Z";
+  const request = async (_config, _method, path) => {
+    const error = new Error(path.endsWith("claim") ? "This craft is not finished yet." : "Mint is still in flight.");
+    error.code = path.endsWith("claim") ? "COOLDOWN_ACTIVE" : "IDEMPOTENCY_IN_FLIGHT";
+    error.retryAt = retryAt;
+    error.details = { state: "submitted_unknown" };
+    throw error;
+  };
+  for (const subcommand of ["claim", "retry-mint"]) {
+    await assert.rejects(
+      runCraftingCommand(config, subcommand, { job: "job_1", confirm: "job_1" }, { request }),
+      (error) => error.code && error.retryAt === retryAt && error.details.state === "submitted_unknown",
+    );
+  }
+});

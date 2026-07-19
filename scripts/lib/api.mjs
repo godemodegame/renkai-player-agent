@@ -48,7 +48,11 @@ export function signRequest(config, method, path, body = "") {
   };
 }
 
-export async function parseResponse(response) {
+function wantsMetadata(options = {}) {
+  return options.metadata === true || options.withMetadata === true || options.includeMetadata === true;
+}
+
+export async function parseResponse(response, options = {}) {
   const text = await response.text();
   let payload;
   try { payload = text ? JSON.parse(text) : null; } catch { payload = null; }
@@ -64,11 +68,22 @@ export async function parseResponse(response) {
     error.details = payload?.error?.details;
     throw error;
   }
-  return payload?.data ?? payload;
+  const data = payload?.data ?? payload;
+  if (wantsMetadata(options)) {
+    return {
+      data,
+      nextRecommendedPollAt: payload?.nextRecommendedPollAt ?? null,
+    };
+  }
+  return data;
 }
 
-export async function unsignedGet(baseUrl, path) {
-  return parseResponse(await fetch(new URL(path, baseUrl), { signal: AbortSignal.timeout(10_000) }));
+export async function parseResponseWithMetadata(response) {
+  return parseResponse(response, { metadata: true });
+}
+
+export async function unsignedGet(baseUrl, path, options = {}) {
+  return parseResponse(await fetch(new URL(path, baseUrl), { signal: AbortSignal.timeout(10_000) }), options);
 }
 
 export async function agentRequest(config, method, path, bodyValue, options = {}) {
@@ -83,5 +98,9 @@ export async function agentRequest(config, method, path, bodyValue, options = {}
     headers,
     body: bodyValue === undefined ? undefined : body,
     signal: AbortSignal.timeout(15_000),
-  }));
+  }), options);
+}
+
+export async function agentRequestWithMetadata(config, method, path, bodyValue, options = {}) {
+  return agentRequest(config, method, path, bodyValue, { ...options, metadata: true });
 }
