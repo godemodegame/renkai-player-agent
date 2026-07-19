@@ -92,7 +92,7 @@ test("does not persist after a failed automation test run", async () => {
   const calls = [];
   const runner = (binary, args) => {
     calls.push({ binary, args });
-    if (binary === "/bin/bash") throw new Error("runtime test failed");
+    if (binary === "/bin/bash") throw Object.assign(new Error("runtime test failed"), { code: "RUNTIME_FAILED" });
     return { stdout: "" };
   };
 
@@ -102,7 +102,7 @@ test("does not persist after a failed automation test run", async () => {
       hermesScriptsDir: scriptsDir,
       request: async () => ({ policy: { mode: "defend", targetCastleId: null, updatedAt: "2026-07-19T00:00:00.000Z" } }),
     }),
-    /runtime test failed/,
+    (error) => error.code === "RUNTIME_FAILED",
   );
 
   assert.deepEqual(config.automation, testConfig().automation);

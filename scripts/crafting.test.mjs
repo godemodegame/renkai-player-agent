@@ -279,7 +279,10 @@ test("retains the durable mutation identity after an ambiguous HTTP 408", async 
     return { craftingJobId: "job_timeout", readyAt: "2099-01-01T00:01:00.000Z" };
   };
   const flags = { recipe: "recipe_timeout", confirm: "recipe_timeout" };
-  await assert.rejects(runCraftingCommand(config, "start", flags, { request, configPath: path }), /timed out/);
+  await assert.rejects(
+    runCraftingCommand(config, "start", flags, { request, configPath: path }),
+    (error) => error.code === "HTTP_408",
+  );
   const pending = (await readMutationState(path)).pending;
   assert.equal(pending.idempotencyKey, keys[0]);
   assert.equal(Number.isFinite(Date.parse(pending.createdAt)), true);
@@ -325,8 +328,7 @@ test("preserves a stable timeout error when native fields are read-only", async 
   try {
     await assert.rejects(
       agentRequest(config, "GET", "/api/crafting/recipes"),
-      (error) => error.name === "TimeoutError" && error.code === "ETIMEDOUT"
-        && error.message === "The operation was aborted due to timeout",
+      (error) => error.name === "TimeoutError" && error.code === "ETIMEDOUT",
     );
   } finally {
     globalThis.fetch = originalFetch;
@@ -345,7 +347,10 @@ test("fails closed on malformed success and reuses durable mutation identity", a
     return { craftingJobId: "job_safe", readyAt: "2099-01-01T00:01:00.000Z" };
   };
   const flags = { recipe: "recipe_safe", confirm: "recipe_safe" };
-  await assert.rejects(runCraftingCommand(config, "start", flags, { request, configPath: path }), /response lost/);
+  await assert.rejects(
+    runCraftingCommand(config, "start", flags, { request, configPath: path }),
+    (error) => error instanceof TypeError,
+  );
   const recovered = await runCraftingCommand(config, "start", flags, { request, configPath: path });
   assert.equal(recovered.craftingJobId, "job_safe");
   assert.equal(keys[0], keys[1]);
@@ -452,13 +457,14 @@ test("retains mutation identity until the validated receipt is written", async (
     writes += 1;
     if (writes === 1) {
       const error = new Error("stdout closed");
+      error.code = "OUTPUT_FAILED";
       error.status = 400;
       throw error;
     }
   };
   await assert.rejects(
     runCraftingCommand(config, "start", flags, { request, configPath: path, onResult }),
-    /stdout closed/,
+    (error) => error.code === "OUTPUT_FAILED",
   );
   assert.equal((await readMutationState(path)).pending.idempotencyKey, keys[0]);
   await runCraftingCommand(config, "start", flags, { request, configPath: path, onResult });

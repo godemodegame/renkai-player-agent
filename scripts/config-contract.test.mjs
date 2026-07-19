@@ -256,7 +256,7 @@ test("keeps private and API keys out of stdout and serialized CLI errors", async
     );
     await assert.rejects(main(["state", "--config", configPath]), (error) => {
       const serialized = JSON.stringify(cliErrorOutput(error));
-      assert.equal(error.message, "Renkai API request failed with HTTP 502.");
+      assert.equal(error.code, "HTTP_502");
       assert.equal(serialized.includes(config.agentKey), false);
       assert.equal(serialized.includes(config.agentKey.slice(0, 12)), false);
       assert.equal(serialized.includes(config.privateKeyPkcs8), false);
