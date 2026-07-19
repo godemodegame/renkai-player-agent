@@ -24,6 +24,7 @@ import {
   signRequest,
   uninstallAutomation,
 } from "./renkai.mjs";
+import { clearNextBattle, setNextBattle, takeStep } from "./lib/battle.mjs";
 
 function base58Decode(value) {
   const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -197,6 +198,171 @@ test("step emits only a war notification reference and acknowledges its original
   });
 });
 
+test("step makes no competing mutation while crafting locks the player", async () => {
+  const config = {
+    ...createWallet(),
+    baseUrl: "https://example.test",
+    agentKey: "agent-key",
+    profile: { direction: "miner", resources: ["iron"], goal: "resources" },
+  };
+  const retryAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  const nextWarAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    const path = new URL(url).pathname;
+    calls.push(`${options.method ?? "GET"} ${path}`);
+    const data = path === "/api/war/state"
+      ? { nextWarAt, policy: { mode: "attack-fixed", targetCastleId: "thornmere" }, pledge: null }
+      : {
+        player: {
+          level: 5,
+          branch: null,
+          class: null,
+          gold: 500,
+          status: "crafting",
+          lockedUntil: retryAt,
+          currentStamina: 10,
+        },
+        activeQuestAction: null,
+      };
+    return new Response(JSON.stringify({ data }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    assert.deepEqual(await takeStep("/tmp/renkai-crafting-lock.json", config), {
+      action: "wait",
+      reason: "player_locked",
+      status: "crafting",
+      retryAt,
+      progressionPending: { selection: "branch", value: "laborer", requiredGold: 50, currentGold: 500 },
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.deepEqual(calls, ["GET /api/war/state", "GET /api/player/state"]);
+});
+
+test("step preserves ready pledges and missed-lock terminal errors while crafting", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "renkai-step-crafting-terminal-test-"));
+  const configPath = join(directory, "agent.json");
+  const config = {
+    version: 3,
+    ...createWallet(),
+    baseUrl: "https://example.test",
+    agentKey: "agent-key",
+    profile: { direction: "miner", resources: ["iron"], goal: "resources" },
+    battle: null,
+    automation: { runtime: null, jobId: null, lastRunAt: null, lastPledgedWindowId: null, lastAlertedWindowId: null, notification: null },
+  };
+  await writeFile(configPath, JSON.stringify(config), { mode: 0o600 });
+  const originalFetch = globalThis.fetch;
+  const originalNow = Date.now;
+  const requests = [];
+  let pledge = { role: "defend", targetCastleId: "ashkeep" };
+  globalThis.fetch = async (url, options = {}) => {
+    const path = new URL(url).pathname;
+    requests.push(`${options.method ?? "GET"} ${path}`);
+    const data = path === "/api/war/state"
+      ? {
+        nextWindowId: "war_step_crafting",
+        nextWarAt: "2026-07-18T08:00:00.000Z",
+        pledgeLockedAt: "2026-07-18T07:55:00.000Z",
+        policy: { mode: "defend", targetCastleId: null },
+        pledge,
+      }
+      : {
+        player: { castleId: "ashkeep", status: "crafting", lockedUntil: "2026-07-18T08:10:00.000Z", level: 5, branch: null, class: null, gold: 500 },
+        activeQuestAction: null,
+      };
+    return new Response(JSON.stringify({ data }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    Date.now = () => Date.UTC(2026, 6, 18, 7, 45);
+    assert.equal((await takeStep(configPath, config)).action, "pledge_ready");
+    pledge = null;
+    config.automation.lastAlertedWindowId = null;
+    await writeFile(configPath, JSON.stringify(config), { mode: 0o600 });
+    Date.now = () => Date.UTC(2026, 6, 18, 7, 56);
+    await assert.rejects(takeStep(configPath, config), (error) => error.code === "BATTLE_PLEDGE_MISSED");
+  } finally {
+    Date.now = originalNow;
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(requests.some((request) => request.startsWith("POST ") || request.startsWith("DELETE ")), false);
+});
+
+test("battle-next set and clear make no pledge mutation while crafting locks the player", async () => {
+  const config = {
+    ...createWallet(),
+    baseUrl: "https://example.test",
+    agentKey: "agent-key",
+    profile: { direction: "miner", resources: ["iron"], goal: "resources" },
+  };
+  const retryAt = "2099-01-01T00:10:00.000Z";
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    const path = new URL(url).pathname;
+    calls.push(`${options.method ?? "GET"} ${path}`);
+    const data = path === "/api/war/state"
+      ? { nextWarAt: "2099-01-01T00:00:00.000Z" }
+      : { player: { castleId: "ashkeep", status: "crafting", lockedUntil: retryAt }, activeQuestAction: null };
+    return new Response(JSON.stringify({ data }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    await assert.rejects(setNextBattle(config, "defend"), (error) => error.code === "PLAYER_LOCKED" && error.retryAt === retryAt);
+    await assert.rejects(clearNextBattle(config), (error) => error.code === "PLAYER_LOCKED" && error.retryAt === retryAt);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(calls.some((call) => call.startsWith("POST ") || call.startsWith("DELETE ")), false);
+});
+
+test("battle mutations fail closed on malformed player status", async () => {
+  const config = {
+    ...createWallet(),
+    baseUrl: "https://example.test",
+    agentKey: "agent-key",
+    profile: { direction: "miner", resources: ["iron"], goal: "resources" },
+    automation: { lastRunAt: null, lastPledgedWindowId: null, lastAlertedWindowId: null },
+  };
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    const path = new URL(url).pathname;
+    calls.push(`${options.method ?? "GET"} ${path}`);
+    const data = path === "/api/war/state"
+      ? { nextWarAt: "2099-01-01T00:00:00.000Z" }
+      : { player: { castleId: "ashkeep", status: null }, activeQuestAction: null };
+    return new Response(JSON.stringify({ data }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    await assert.rejects(setNextBattle(config, "defend"), (error) => error.code === "PLAYER_LOCKED");
+    await assert.rejects(clearNextBattle(config), (error) => error.code === "PLAYER_LOCKED");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  const tickCalls = [];
+  const result = await battleTick("/tmp/renkai-malformed-lock.json", config, {
+    nowMs: Date.UTC(2026, 6, 18, 7, 45),
+    force: true,
+    warState: {
+      nextWindowId: "war_malformed_player",
+      nextWarAt: "2026-07-18T08:00:00.000Z",
+      pledgeLockedAt: "2026-07-18T07:55:00.000Z",
+      policy: { mode: "defend", targetCastleId: null },
+      pledge: null,
+    },
+    request: async (_config, method, path) => {
+      tickCalls.push(`${method} ${path}`);
+      return { player: { castleId: "ashkeep", status: null }, activeQuestAction: null };
+    },
+  });
+  assert.equal(result.reason, "PLAYER_LOCKED");
+  assert.equal(calls.some((call) => call.startsWith("POST ") || call.startsWith("DELETE ")), false);
+  assert.deepEqual(tickCalls, ["GET /api/player/state"]);
+});
+
 test("accepts only app.renkai.xyz referral links or an explicit no-referrer choice", () => {
   assert.deepEqual(parseReferralInput("https://app.renkai.xyz/start?ref=player_abc-123&utm_source=agent"), {
     referrerPlayerId: "player_abc-123",
@@ -337,6 +503,89 @@ test("battle tick treats no policy and no pledge as a valid opt-out", async () =
   });
 });
 
+test("battle tick does not pledge while crafting locks the player", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "renkai-battle-crafting-lock-test-"));
+  const configPath = join(directory, "agent.json");
+  const config = {
+    version: 3,
+    ...createWallet(),
+    baseUrl: "https://example.invalid",
+    agentKey: "secret",
+    profile: { direction: "miner", resources: ["iron"], goal: "resources" },
+    battle: null,
+    automation: { runtime: null, jobId: null, lastRunAt: null, lastPledgedWindowId: null, lastAlertedWindowId: null, notification: null },
+  };
+  const retryAt = "2026-07-18T08:10:00.000Z";
+  const calls = [];
+  const result = await battleTick(configPath, config, {
+    nowMs: Date.UTC(2026, 6, 18, 7, 45),
+    force: true,
+    warState: {
+      nextWindowId: "war_crafting_lock",
+      nextWarAt: "2026-07-18T08:00:00.000Z",
+      pledgeLockedAt: "2026-07-18T07:55:00.000Z",
+      policy: { mode: "attack_fixed", targetCastleId: "thornmere" },
+      pledge: null,
+    },
+    request: async (_config, method, path) => {
+      calls.push(`${method} ${path}`);
+      return {
+        player: { castleId: "ashkeep", status: "crafting", lockedUntil: retryAt },
+        activeQuestAction: null,
+      };
+    },
+  });
+  assert.deepEqual(result, {
+    action: "retry",
+    windowId: "war_crafting_lock",
+    retryAt,
+    reason: "PLAYER_LOCKED",
+  });
+  assert.deepEqual(calls, ["GET /api/player/state"]);
+});
+
+test("crafting lock preserves ready pledges and missed-lock terminal errors", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "renkai-battle-crafting-terminal-test-"));
+  const configPath = join(directory, "agent.json");
+  const config = {
+    version: 3,
+    ...createWallet(),
+    baseUrl: "https://example.invalid",
+    agentKey: "secret",
+    profile: { direction: "miner", resources: ["iron"], goal: "resources" },
+    battle: null,
+    automation: { runtime: null, jobId: null, lastRunAt: null, lastPledgedWindowId: null, lastAlertedWindowId: null, notification: null },
+  };
+  await writeFile(configPath, JSON.stringify(config), { mode: 0o600 });
+  const request = async () => ({
+    player: { castleId: "ashkeep", status: "crafting", lockedUntil: "2026-07-18T08:10:00.000Z" },
+    activeQuestAction: null,
+  });
+  const baseWarState = {
+    nextWindowId: "war_crafting_terminal",
+    nextWarAt: "2026-07-18T08:00:00.000Z",
+    pledgeLockedAt: "2026-07-18T07:55:00.000Z",
+    policy: { mode: "defend", targetCastleId: null },
+  };
+  const ready = await battleTick(configPath, config, {
+    nowMs: Date.UTC(2026, 6, 18, 7, 45),
+    force: true,
+    warState: { ...baseWarState, pledge: { role: "defend", targetCastleId: "ashkeep" } },
+    request,
+  });
+  assert.equal(ready.action, "pledge_ready");
+
+  await assert.rejects(
+    battleTick(configPath, config, {
+      nowMs: Date.UTC(2026, 6, 18, 7, 56),
+      force: true,
+      warState: { ...baseWarState, pledge: null },
+      request,
+    }),
+    (error) => error.code === "BATTLE_PLEDGE_MISSED",
+  );
+});
+
 test("battle-next creates and clears only a one-window pledge", async () => {
   const directory = await mkdtemp(join(tmpdir(), "renkai-battle-next-test-"));
   const configPath = join(directory, "agent.json");
@@ -360,7 +609,7 @@ test("battle-next creates and clears only a one-window pledge", async () => {
     const data = path === "/api/war/state"
       ? { nextWindowId: "war_next", nextWarAt: "2026-07-18T08:00:00.000Z", pledgeLockedAt: "2026-07-18T07:55:00.000Z", policy: null, pledge: null }
       : path === "/api/player/state"
-        ? { player: { castleId: "ashkeep" } }
+        ? { player: { castleId: "ashkeep", status: "idle" }, activeQuestAction: null }
         : { pledge: null, policy: null };
     return new Response(JSON.stringify({ data }), { status: 200, headers: { "Content-Type": "application/json" } });
   };
@@ -416,7 +665,7 @@ test("battle tick pledges during reserve and emits only one missed-window error"
     warState,
     request: async (_config, method, path, body) => {
       requests.push({ method, path, body });
-      if (path === "/api/player/state") return { player: { castleId: "ashkeep" } };
+      if (path === "/api/player/state") return { player: { castleId: "ashkeep", status: "idle" }, activeQuestAction: null };
       return {};
     },
   });
@@ -462,7 +711,7 @@ test("explicit all-battles scheduler pledges three consecutive wars and uses a c
   await writeFile(configPath, JSON.stringify(config));
   const pledges = [];
   const request = async (_config, method, path, body) => {
-    if (path === "/api/player/state") return { player: { castleId: "ashkeep" } };
+    if (path === "/api/player/state") return { player: { castleId: "ashkeep", status: "idle" }, activeQuestAction: null };
     if (method === "POST" && path === "/api/war/pledge") pledges.push(body);
     return {};
   };

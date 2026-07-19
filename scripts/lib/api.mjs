@@ -48,40 +48,116 @@ export function signRequest(config, method, path, body = "") {
   };
 }
 
-export async function parseResponse(response) {
+function wantsMetadata(options = {}) {
+  return options.metadata === true || options.withMetadata === true || options.includeMetadata === true;
+}
+
+function endpointUrl(baseUrl, path) {
+  const base = new URL(baseUrl);
+  const url = new URL(path, base);
+  const loopback = ["127.0.0.1", "[::1]", "localhost"].includes(url.hostname);
+  if (url.origin !== base.origin || (url.protocol !== "https:" && !(url.protocol === "http:" && loopback))
+    || url.username || url.password) {
+    const error = new Error("Renkai API requests require an HTTPS origin (HTTP is allowed only on loopback).");
+    error.code = "INSECURE_API_ORIGIN";
+    throw error;
+  }
+  return url;
+}
+
+function redactValue(value, secrets) {
+  if (typeof value === "string") {
+    return secrets.reduce((safe, secret) => safe.replaceAll(secret, "[REDACTED]"), value);
+  }
+  if (Array.isArray(value)) return value.map((item) => redactValue(item, secrets));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+      redactValue(key, secrets),
+      redactValue(item, secrets),
+    ]));
+  }
+  return value;
+}
+
+function redactAgentError(error, config) {
+  const secrets = [config.agentKey, config.privateKeyPkcs8]
+    .filter((value) => typeof value === "string" && value.length > 0)
+    .sort((left, right) => right.length - left.length);
+  if (!secrets.length || !error || typeof error !== "object") return error;
+  const safe = new Error(redactValue(error.message ?? String(error), secrets));
+  safe.name = typeof error.name === "string" ? redactValue(error.name, secrets) : "Error";
+  for (const [key, value] of Object.entries(error)) {
+    if (key === "message") continue;
+    safe[redactValue(key, secrets)] = redactValue(value, secrets);
+  }
+  if (error.name === "TimeoutError" && typeof safe.code !== "string") safe.code = "ETIMEDOUT";
+  return safe;
+}
+
+export async function parseResponse(response, options = {}) {
   const text = await response.text();
   let payload;
   try { payload = text ? JSON.parse(text) : null; } catch { payload = null; }
   if (!response.ok) {
-    const code = payload?.error?.code ?? (response.status === 404 ? "API_NOT_DEPLOYED" : `HTTP_${response.status}`);
-    const message = payload?.error?.message ?? (response.status === 404
+    const responseCode = payload?.error?.code;
+    const code = typeof responseCode === "string" && responseCode.length > 0
+      ? responseCode
+      : response.status === 404 ? "API_NOT_DEPLOYED" : `HTTP_${response.status}`;
+    const responseMessage = payload?.error?.message;
+    const message = typeof responseMessage === "string" && responseMessage.length > 0
+      ? responseMessage
+      : response.status === 404
       ? "This Renkai deployment does not expose the requested Agent API route yet."
-      : text.slice(0, 200) || response.statusText);
+      : `Renkai API request failed with HTTP ${response.status}.`;
     const error = new Error(message);
     error.code = code;
     error.status = response.status;
-    error.retryAt = payload?.error?.retryAt;
+    error.retryAt = typeof payload?.error?.retryAt === "string" ? payload.error.retryAt : undefined;
     error.details = payload?.error?.details;
     throw error;
   }
-  return payload?.data ?? payload;
+  const data = payload?.data ?? payload;
+  if (wantsMetadata(options)) {
+    return {
+      data,
+      nextRecommendedPollAt: payload?.nextRecommendedPollAt ?? null,
+    };
+  }
+  return data;
 }
 
-export async function unsignedGet(baseUrl, path) {
-  return parseResponse(await fetch(new URL(path, baseUrl), { signal: AbortSignal.timeout(10_000) }));
+export async function parseResponseWithMetadata(response) {
+  return parseResponse(response, { metadata: true });
+}
+
+export async function unsignedGet(baseUrl, path, options = {}) {
+  return parseResponse(await fetch(endpointUrl(baseUrl, path), {
+    redirect: "error",
+    signal: AbortSignal.timeout(10_000),
+  }), options);
 }
 
 export async function agentRequest(config, method, path, bodyValue, options = {}) {
   if (options.requireKey !== false && !config.agentKey) throw new Error("The wallet is not registered. Run register first.");
+  const url = endpointUrl(config.baseUrl, path);
   const body = bodyValue === undefined ? "" : JSON.stringify(bodyValue);
   const headers = signRequest(config, method, path, body);
   if (config.agentKey) headers["X-Agent-Key"] = config.agentKey;
   if (bodyValue !== undefined) headers["Content-Type"] = "application/json";
   if (options.idempotent) headers["X-Idempotency-Key"] = options.idempotencyKey ?? randomUUID();
-  return parseResponse(await fetch(new URL(path, config.baseUrl), {
-    method,
-    headers,
-    body: bodyValue === undefined ? undefined : body,
-    signal: AbortSignal.timeout(15_000),
-  }));
+  try {
+    return await parseResponse(await fetch(url, {
+      method,
+      headers,
+      body: bodyValue === undefined ? undefined : body,
+      redirect: "error",
+      signal: AbortSignal.timeout(15_000),
+    }), options);
+  } catch (error) {
+    throw redactAgentError(error, config);
+  }
+}
+
+export async function agentRequestWithMetadata(config, method, path, bodyValue, options = {}) {
+  return agentRequest(config, method, path, bodyValue, { ...options, metadata: true });
 }

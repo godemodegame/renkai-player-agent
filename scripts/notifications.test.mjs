@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, link, mkdir, mkdtemp, stat, utimes, writeFile } from "node:fs/promises";
+import { chmod, link, mkdir, mkdtemp, readFile, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -301,6 +301,51 @@ test("allows only one winner when stale-lock reclamation races", async () => {
     assert.equal(winners.length, 1);
     assert.equal(await releaseNotificationLock(winners[0].value), true);
   }
+});
+
+test("serializes stale takeover so a second owner cannot replace the canonical lock", async () => {
+  const { configPath } = await fixture("renkai-lock-takeover-");
+  const lockPath = notificationLockPath(configPath);
+  const old = Date.now() - 16 * 60 * 1000;
+  await writeFile(lockPath, JSON.stringify({ token: "stale-paused", timestamp: old }), { mode: 0o600 });
+  await utimes(lockPath, old / 1000, old / 1000);
+  let resumeTakeover;
+  const takeoverPaused = new Promise((resolve) => {
+    resumeTakeover = resolve;
+  });
+  let markPaused;
+  const paused = new Promise((resolve) => {
+    markPaused = resolve;
+  });
+  const first = acquireNotificationLock(configPath, {
+    beforeLockUnlink: async () => {
+      markPaused();
+      await takeoverPaused;
+    },
+  });
+  await paused;
+  await assert.rejects(
+    acquireNotificationLock(configPath, { now: Date.now() + 16 * 60 * 1000 }),
+    (error) => error.code === "NOTIFICATION_DRAIN_BUSY",
+  );
+  assert.equal(JSON.parse(await readFile(lockPath, "utf8")).token, "stale-paused");
+  resumeTakeover();
+  const owner = await first;
+  assert.equal(await releaseNotificationLock(owner), true);
+});
+
+test("never reclaims an old canonical lock from a live owner", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "renkai-notification-live-owner-"));
+  const configPath = join(directory, "agent.json");
+  const lockPath = notificationLockPath(configPath);
+  const old = Date.now() - 16 * 60 * 1000;
+  await writeFile(lockPath, JSON.stringify({ token: "live-owner", pid: process.pid, timestamp: old }), { mode: 0o600 });
+  await utimes(lockPath, old / 1000, old / 1000);
+  await assert.rejects(
+    acquireNotificationLock(configPath),
+    (error) => error.code === "NOTIFICATION_DRAIN_BUSY",
+  );
+  assert.equal(JSON.parse(await readFile(lockPath, "utf8")).token, "live-owner");
 });
 
 test("sidecar writes are mode 0600 and use the config-derived path", async () => {

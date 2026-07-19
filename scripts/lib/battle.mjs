@@ -45,12 +45,14 @@ export async function setNextBattle(config, mode, targetCastleId) {
     agentRequest(config, "GET", "/api/war/state"),
     agentRequest(config, "GET", "/api/player/state"),
   ]);
+  throwIfPlayerLocked(playerState);
   const pledge = desiredPledge(instruction, playerState.player.castleId, warState.nextWarAt);
   const state = await agentRequest(config, "POST", "/api/war/pledge", pledge, { idempotent: true });
   return { scope: "next_battle", instruction, pledge, state };
 }
 
 export async function clearNextBattle(config) {
+  throwIfPlayerLocked(await agentRequest(config, "GET", "/api/player/state"));
   const state = await agentRequest(config, "DELETE", "/api/war/pledge", undefined, { idempotent: true });
   return { scope: "next_battle", instruction: null, state };
 }
@@ -59,6 +61,25 @@ function desiredPledge(policy, playerCastleId, nextWarAt) {
   if (policy.mode === "defend") return { role: "defend", targetCastleId: playerCastleId };
   if (policy.mode === "attack_fixed") return { role: "attack", targetCastleId: policy.targetCastleId };
   return { role: "attack", targetCastleId: cycleTarget(playerCastleId, nextWarAt) };
+}
+
+function playerLock(playerState) {
+  const status = playerState.player.status;
+  if (!playerState.activeQuestAction && typeof status === "string" && (status === "idle" || status === "rest")) return null;
+  return {
+    status: typeof status === "string" ? status : "unknown",
+    retryAt: playerState.activeQuestAction?.lockedUntil ?? playerState.player.lockedUntil,
+  };
+}
+
+function throwIfPlayerLocked(playerState) {
+  const lock = playerLock(playerState);
+  if (!lock) return;
+  const error = new Error("The player is currently locked by another action.");
+  error.code = "PLAYER_LOCKED";
+  error.retryAt = lock.retryAt;
+  error.details = { status: lock.status };
+  throw error;
 }
 
 async function ensureBattlePledge(configPath, config, warState, nowMs, request = agentRequest) {
@@ -85,6 +106,15 @@ async function ensureBattlePledge(configPath, config, warState, nowMs, request =
     const error = new Error(`The opted-in all-battles pledge was not installed before lock for ${warState.nextWindowId}.`);
     error.code = "BATTLE_PLEDGE_MISSED";
     throw error;
+  }
+  const lock = playerLock(playerState);
+  if (lock) {
+    return {
+      action: "retry",
+      windowId: warState.nextWindowId,
+      retryAt: lock.retryAt,
+      reason: "PLAYER_LOCKED",
+    };
   }
   try {
     await request(config, "POST", "/api/war/pledge", desired, { idempotent: true });
@@ -159,6 +189,15 @@ export async function battleTick(configPath, config, options = {}) {
 export async function takeStep(configPath, config) {
   const nowMs = Date.now();
   const warState = await agentRequest(config, "GET", "/api/war/state");
+  const state = await agentRequest(config, "GET", "/api/player/state");
+  const player = state.player;
+  const desiredClass = config.profile.direction;
+  const desiredBranch = BRANCH_BY_DIRECTION[desiredClass];
+  const progressionPending = player.level >= 5 && !player.branch
+    ? { selection: "branch", value: desiredBranch, requiredGold: 50, currentGold: player.gold }
+    : player.level >= 15 && player.branch && !player.class
+      ? { selection: "class", value: desiredClass, requiredGold: 100, currentGold: player.gold }
+      : undefined;
   const inReserve = nowMs >= Date.parse(warState.nextWarAt) - WAR_RESERVE_MS && nowMs < Date.parse(warState.nextWarAt);
   if (warState.policy && inReserve) {
     const battle = await ensureBattlePledge(configPath, config, warState, nowMs);
@@ -167,26 +206,17 @@ export async function takeStep(configPath, config) {
   if (warState.pledge && inReserve) {
     return { action: "wait", reason: "next_battle_reserved", pledge: warState.pledge, retryAt: warState.nextWarAt };
   }
-  const state = await agentRequest(config, "GET", "/api/player/state");
-  const player = state.player;
   if (state.activeQuestAction) {
     return { action: "wait", reason: "quest_in_progress", quest: state.activeQuestAction.questName, retryAt: state.activeQuestAction.lockedUntil };
   }
-  const desiredClass = config.profile.direction;
-  const desiredBranch = BRANCH_BY_DIRECTION[desiredClass];
+  if (player.status !== "idle" && player.status !== "rest") {
+    return { action: "wait", reason: "player_locked", status: player.status, retryAt: player.lockedUntil, progressionPending };
+  }
   if (player.level >= 5 && !player.branch && player.gold >= 50) {
     return { action: "selected_branch", branch: desiredBranch, result: await agentRequest(config, "POST", "/api/player/branch", { branch: desiredBranch }, { idempotent: true }) };
   }
   if (player.level >= 15 && player.branch && !player.class && player.gold >= 100) {
     return { action: "selected_class", class: desiredClass, result: await agentRequest(config, "POST", "/api/player/class", { class: desiredClass }, { idempotent: true }) };
-  }
-  const progressionPending = player.level >= 5 && !player.branch
-    ? { selection: "branch", value: desiredBranch, requiredGold: 50, currentGold: player.gold }
-    : player.level >= 15 && player.branch && !player.class
-      ? { selection: "class", value: desiredClass, requiredGold: 100, currentGold: player.gold }
-      : undefined;
-  if (player.status !== "idle" && player.status !== "rest") {
-    return { action: "wait", reason: "player_locked", status: player.status, retryAt: player.lockedUntil, progressionPending };
   }
   if (player.currentStamina < 1) return { action: "wait", reason: "no_stamina", retryAt: player.nextStaminaAt, progressionPending };
   const questData = await agentRequest(config, "GET", "/api/quests");

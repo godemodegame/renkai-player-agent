@@ -19,7 +19,7 @@ function clock(options) {
 
 function retryable(error) {
   const status = Number(error?.status ?? error?.code?.match?.(/^HTTP_(\d{3})$/u)?.[1]);
-  if (error?.code === "IDEMPOTENCY_IN_FLIGHT" || error?.name === "AbortError" || error?.code === "ABORT_ERR") return true;
+  if (error?.code === "IDEMPOTENCY_IN_FLIGHT" || error?.name === "AbortError" || error?.name === "TimeoutError" || error?.code === "ABORT_ERR") return true;
   if (status === 408 || status === 429 || status >= 500) return true;
   if (Number.isFinite(status) || error?.code) return /^(?:ECONN|ETIMEDOUT|EAI_AGAIN|ENET|EHOST|UND_|ERR_NETWORK|NETWORK_ERROR|FETCH_FAILED)/u.test(error.code ?? "");
   return error instanceof TypeError || /(?:network|fetch|socket|timeout|connection)/iu.test(error?.message ?? "");

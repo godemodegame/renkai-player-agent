@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, link, lstat, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { BRANCH_BY_DIRECTION } from "./strategy.mjs";
@@ -92,6 +92,14 @@ async function staleLock(lockPath, now) {
       const rawTimestamp = record.timestamp ?? record.createdAt;
       const recordedAt = typeof rawTimestamp === "number" ? rawTimestamp : Date.parse(rawTimestamp);
       if (typeof record.token === "string" && record.token.length > 0 && Number.isFinite(recordedAt) && recordedAt < cutoff) {
+        if (Number.isInteger(record.pid) && record.pid > 0) {
+          try {
+            process.kill(record.pid, 0);
+            return null;
+          } catch (error) {
+            if (error?.code !== "ESRCH") return null;
+          }
+        }
         return { token: record.token, mtimeMs: file.mtimeMs, malformed: false, cutoff };
       }
       if (typeof record.token === "string" && record.token.length > 0 && Number.isFinite(recordedAt)) return null;
@@ -104,18 +112,27 @@ async function staleLock(lockPath, now) {
   }
 }
 
-async function claimNotificationLock(lockPath, candidate) {
+async function claimNotificationLock(lockPath, candidate, now = () => Date.now(), beforeUnlink) {
   const expected = typeof candidate === "string"
     ? { token: candidate, malformed: false, mtimeMs: null, cutoff: null }
     : candidate;
-  const claimPath = `${lockPath}.claim.${expected.token ?? "malformed"}`;
+  const claimPath = `${lockPath}.claim`;
+  let handle;
+  let claimCreated = false;
   try {
-    await link(lockPath, claimPath);
+    handle = await open(claimPath, "wx", 0o600);
+    claimCreated = true;
+    await handle.writeFile(`${JSON.stringify({ token: randomUUID(), pid: process.pid, timestamp: now() })}\n`);
+    await handle.close();
+    handle = null;
+    await chmod(claimPath, 0o600);
   } catch {
+    await handle?.close().catch(() => {});
+    if (claimCreated) await unlink(claimPath).catch(() => {});
     return false;
   }
   try {
-    const [metadata, file] = await Promise.all([readFile(claimPath, "utf8"), stat(claimPath)]);
+    const [metadata, file] = await Promise.all([readFile(lockPath, "utf8"), stat(lockPath)]);
     if (expected.mtimeMs !== null && file.mtimeMs !== expected.mtimeMs) return false;
     let matches = false;
     try {
@@ -128,6 +145,7 @@ async function claimNotificationLock(lockPath, candidate) {
       matches = expected.malformed;
     }
     if (!matches || (expected.malformed && file.mtimeMs >= expected.cutoff)) return false;
+    if (beforeUnlink) await beforeUnlink();
     try {
       await unlink(lockPath);
     } catch (error) {
@@ -142,13 +160,33 @@ async function claimNotificationLock(lockPath, candidate) {
 
 async function cleanupStaleLockClaims(lockPath, now) {
   const directory = dirname(lockPath);
-  const prefix = `${basename(lockPath)}.claim.`;
+  const claimName = `${basename(lockPath)}.claim`;
   const cutoff = now() - 15 * 60 * 1000;
   const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
-  await Promise.all(entries.filter((entry) => entry.name.startsWith(prefix)).map(async (entry) => {
+  await Promise.all(entries.filter((entry) => entry.name === claimName || entry.name.startsWith(`${claimName}.`)).map(async (entry) => {
     const claimPath = join(directory, entry.name);
     const file = await lstat(claimPath).catch(() => null);
-    if (file && file.mtimeMs < cutoff) await unlink(claimPath).catch(() => {});
+    if (!file) return;
+    let recordedAt = file.mtimeMs;
+    let ownerPid = null;
+    try {
+      const record = JSON.parse(await readFile(claimPath, "utf8"));
+      if (Number.isInteger(record.pid) && record.pid > 0) ownerPid = record.pid;
+      const rawTimestamp = record.timestamp ?? record.createdAt;
+      const parsed = typeof rawTimestamp === "number" ? rawTimestamp : Date.parse(rawTimestamp);
+      if (Number.isFinite(parsed)) recordedAt = parsed;
+    } catch {
+      // Legacy or interrupted claim files fall back to their own modification time.
+    }
+    if (ownerPid !== null) {
+      try {
+        process.kill(ownerPid, 0);
+        return;
+      } catch (error) {
+        if (error?.code !== "ESRCH") return;
+      }
+    }
+    if (recordedAt < cutoff) await unlink(claimPath).catch(() => {});
   }));
 }
 
@@ -161,7 +199,7 @@ export async function acquireNotificationLock(configPath, options = {}) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const handle = await open(lockPath, "wx", 0o600);
-      await handle.writeFile(`${JSON.stringify({ token, timestamp: now(), createdAt: new Date(now()).toISOString() })}\n`);
+      await handle.writeFile(`${JSON.stringify({ token, pid: process.pid, timestamp: now(), createdAt: new Date(now()).toISOString() })}\n`);
       await handle.close();
       await chmod(lockPath, 0o600);
       return { lockPath, token };
@@ -173,7 +211,7 @@ export async function acquireNotificationLock(configPath, options = {}) {
         throw busy;
       }
       const staleToken = await staleLock(lockPath, now);
-      if (!staleToken || !(await claimNotificationLock(lockPath, staleToken))) {
+      if (!staleToken || !(await claimNotificationLock(lockPath, staleToken, now, options.beforeLockUnlink))) {
         const busy = new Error("Another Renkai notification drain is already running.");
         busy.code = "NOTIFICATION_DRAIN_BUSY";
         busy.retryAt = new Date(now() + 5_000).toISOString();
