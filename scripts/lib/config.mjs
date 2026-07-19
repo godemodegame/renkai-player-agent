@@ -110,14 +110,17 @@ async function claimNotificationLock(lockPath, candidate, now = () => Date.now()
     : candidate;
   const claimPath = `${lockPath}.claim`;
   let handle;
+  let claimCreated = false;
   try {
     handle = await open(claimPath, "wx", 0o600);
+    claimCreated = true;
     await handle.writeFile(`${JSON.stringify({ token: randomUUID(), pid: process.pid, timestamp: now() })}\n`);
     await handle.close();
     handle = null;
     await chmod(claimPath, 0o600);
   } catch {
     await handle?.close().catch(() => {});
+    if (claimCreated) await unlink(claimPath).catch(() => {});
     return false;
   }
   try {
