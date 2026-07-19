@@ -197,13 +197,13 @@ test("rejects invalid limits and cursors before signing or requesting", async ()
   for (const limit of [0, 101, "1.5", "abc", "", true]) {
     await assert.rejects(
       readInventory({}, { limit }, { request }),
-      /--limit must be an integer from 1 to 100\./,
+      (error) => error.code === "VALIDATION_ERROR",
     );
   }
   for (const cursor of ["", "x".repeat(129), 12, true]) {
     await assert.rejects(
       readInventory({}, { cursor }, { request }),
-      /--cursor must be a non-empty opaque value no longer than 128 characters\./,
+      (error) => error.code === "VALIDATION_ERROR",
     );
   }
   assert.equal(calls, 0);

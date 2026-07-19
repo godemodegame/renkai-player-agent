@@ -89,7 +89,6 @@ test("runs notification status inventory and crafting through the real CLI", asy
         name: "Iron Knife",
         tier: "T1",
         slot: "weapon",
-        requiredStation: "forge",
         requiredPlayerLevel: 5,
         requiredCastleId: "ashkeep",
         requiredBranch: "laborer",

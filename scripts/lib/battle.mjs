@@ -45,12 +45,14 @@ export async function setNextBattle(config, mode, targetCastleId) {
     agentRequest(config, "GET", "/api/war/state"),
     agentRequest(config, "GET", "/api/player/state"),
   ]);
+  throwIfPlayerLocked(playerState);
   const pledge = desiredPledge(instruction, playerState.player.castleId, warState.nextWarAt);
   const state = await agentRequest(config, "POST", "/api/war/pledge", pledge, { idempotent: true });
   return { scope: "next_battle", instruction, pledge, state };
 }
 
 export async function clearNextBattle(config) {
+  throwIfPlayerLocked(await agentRequest(config, "GET", "/api/player/state"));
   const state = await agentRequest(config, "DELETE", "/api/war/pledge", undefined, { idempotent: true });
   return { scope: "next_battle", instruction: null, state };
 }
@@ -61,6 +63,25 @@ function desiredPledge(policy, playerCastleId, nextWarAt) {
   return { role: "attack", targetCastleId: cycleTarget(playerCastleId, nextWarAt) };
 }
 
+function playerLock(playerState) {
+  const status = playerState.player.status;
+  if (!playerState.activeQuestAction && !(typeof status === "string" && status !== "idle" && status !== "rest")) return null;
+  return {
+    status,
+    retryAt: playerState.activeQuestAction?.lockedUntil ?? playerState.player.lockedUntil,
+  };
+}
+
+function throwIfPlayerLocked(playerState) {
+  const lock = playerLock(playerState);
+  if (!lock) return;
+  const error = new Error("The player is currently locked by another action.");
+  error.code = "PLAYER_LOCKED";
+  error.retryAt = lock.retryAt;
+  error.details = { status: lock.status };
+  throw error;
+}
+
 async function ensureBattlePledge(configPath, config, warState, nowMs, request = agentRequest) {
   if (!warState.policy) {
     const error = new Error("No all-battles policy is configured.");
@@ -68,15 +89,6 @@ async function ensureBattlePledge(configPath, config, warState, nowMs, request =
     throw error;
   }
   const playerState = await request(config, "GET", "/api/player/state");
-  const playerStatus = playerState.player.status;
-  if (playerState.activeQuestAction || (typeof playerStatus === "string" && playerStatus !== "idle" && playerStatus !== "rest")) {
-    return {
-      action: "retry",
-      windowId: warState.nextWindowId,
-      retryAt: playerState.activeQuestAction?.lockedUntil ?? playerState.player.lockedUntil,
-      reason: "PLAYER_LOCKED",
-    };
-  }
   const desired = desiredPledge(warState.policy, playerState.player.castleId, warState.nextWarAt);
   if (warState.pledge?.role === desired.role && warState.pledge?.targetCastleId === desired.targetCastleId) {
     config.automation.lastRunAt = new Date(nowMs).toISOString();
@@ -94,6 +106,15 @@ async function ensureBattlePledge(configPath, config, warState, nowMs, request =
     const error = new Error(`The opted-in all-battles pledge was not installed before lock for ${warState.nextWindowId}.`);
     error.code = "BATTLE_PLEDGE_MISSED";
     throw error;
+  }
+  const lock = playerLock(playerState);
+  if (lock) {
+    return {
+      action: "retry",
+      windowId: warState.nextWindowId,
+      retryAt: lock.retryAt,
+      reason: "PLAYER_LOCKED",
+    };
   }
   try {
     await request(config, "POST", "/api/war/pledge", desired, { idempotent: true });

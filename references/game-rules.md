@@ -18,7 +18,7 @@
 | `blacksmith` | `laborer` | `blacksmith` | Can craft and repair gear |
 | `miner` | `laborer` | `miner` | +1 of each resource yielded by gathering quests |
 
-From levels 5 through 14, a laborer with no final class may craft laborer recipes at the forge. Reaching level 15 ends this apprenticeship even before a final class is chosen. A blacksmith may craft either branch and repair gear; a miner may do neither.
+Every T1 recipe can be crafted by a base `laborer`, `blacksmith`, or `miner` when its independent level, Gold, and resource requirements are met. Recipes above T1 require the `blacksmith` class. Fighters and fighter specializations do not gain crafting access, and crafting stations are not part of the game contract.
 
 ## Quest preference
 

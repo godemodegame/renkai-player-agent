@@ -18,14 +18,14 @@ The read is owner-scoped and mutation-free. Treat the cursor as opaque and pass 
 
 | CLI command | HTTP request | Notes |
 | --- | --- | --- |
-| `crafting recipes` | `GET /api/crafting/recipes` | Shows station, level, branch, duration, Gold, resource costs, and bonuses. |
+| `crafting recipes` | `GET /api/crafting/recipes` | Shows tier, level, branch, duration, Gold, resource costs, and bonuses. |
 | `crafting list` | `GET /api/crafting/jobs` | Resume-safe job history with each current status plus `nextRecommendedPollAt`. |
 | `crafting start --recipe R --confirm R` | `POST /api/crafting/request` | Body `{ "recipeId": "R" }`; Gold/resources are spent once. |
 | `crafting cancel --job J --confirm J` | `POST /api/crafting/cancel` | Body `{ "craftingJobId": "J" }`; spent inputs are not refunded. |
 | `crafting claim --job J --confirm J` | `POST /api/crafting/claim` | Creates the gear item once and attempts its mint. |
 | `crafting retry-mint --job J --confirm J` | `POST /api/crafting/retry-mint` | Retries minting the existing gear item; never starts a second craft. |
 
-Every mutation is idempotent. `--confirm` must exactly match the target ID. Laborer apprentices may craft laborer recipes only from levels 5 through 14; blacksmiths may craft both branches. Use the server's `readyAt`, `nextRecommendedPollAt`, `retryAt`, and status fields instead of fixed polling intervals.
+Every mutation is idempotent. `--confirm` must exactly match the target ID. Every T1 recipe is available to base laborers, blacksmiths, and miners when its independent level, Gold, and resource requirements are met; recipes above T1 require the blacksmith class. Fighters do not gain crafting access. Crafting stations are not part of the game contract, so never prompt for or send station data. Use the server's `readyAt`, `nextRecommendedPollAt`, `retryAt`, and status fields instead of fixed polling intervals.
 
 ## Latest war result
 

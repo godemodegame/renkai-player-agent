@@ -21,10 +21,16 @@ function unwrapMetadata(result) {
   return { data: result, nextRecommendedPollAt: null };
 }
 
+function validationError(message, code = "VALIDATION_ERROR") {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
 function requireRecipeId(flags = {}) {
   const recipeId = flags.recipe;
   if (typeof recipeId !== "string" || recipeId.length === 0) {
-    throw new Error("crafting start requires --recipe <recipeId>.");
+    throw validationError("crafting start requires --recipe <recipeId>.");
   }
   return recipeId;
 }
@@ -32,14 +38,17 @@ function requireRecipeId(flags = {}) {
 function requireJobId(flags = {}, command) {
   const craftingJobId = flags.job;
   if (typeof craftingJobId !== "string" || craftingJobId.length === 0) {
-    throw new Error(`crafting ${command} requires --job <craftingJobId>.`);
+    throw validationError(`crafting ${command} requires --job <craftingJobId>.`);
   }
   return craftingJobId;
 }
 
 function requireConfirmation(flags, target, command, targetName) {
   if (flags.confirm !== target) {
-    throw new Error(`crafting ${command} requires --confirm <${targetName}> exactly matching --${targetName === "recipeId" ? "recipe" : "job"}.`);
+    throw validationError(
+      `crafting ${command} requires --confirm <${targetName}> exactly matching --${targetName === "recipeId" ? "recipe" : "job"}.`,
+      "CONFIRMATION_REQUIRED",
+    );
   }
 }
 
@@ -83,7 +92,6 @@ function isRecipe(value) {
     && isNullableString(value.name)
     && isString(value.tier)
     && isString(value.slot)
-    && isString(value.requiredStation)
     && Number.isInteger(value.requiredPlayerLevel) && value.requiredPlayerLevel >= 0
     && isNullableString(value.requiredCastleId)
     && ["fighter", "laborer", null].includes(value.requiredBranch)

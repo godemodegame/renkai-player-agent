@@ -24,7 +24,7 @@ import {
   signRequest,
   uninstallAutomation,
 } from "./renkai.mjs";
-import { takeStep } from "./lib/battle.mjs";
+import { clearNextBattle, setNextBattle, takeStep } from "./lib/battle.mjs";
 
 function base58Decode(value) {
   const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -215,9 +215,9 @@ test("step makes no competing mutation while crafting locks the player", async (
       ? { nextWarAt: retryAt, policy: { mode: "attack-fixed", targetCastleId: "thornmere" }, pledge: null }
       : {
         player: {
-          level: 20,
-          branch: "laborer",
-          class: "miner",
+          level: 5,
+          branch: null,
+          class: null,
           gold: 500,
           status: "crafting",
           lockedUntil: retryAt,
@@ -233,12 +233,39 @@ test("step makes no competing mutation while crafting locks the player", async (
       reason: "player_locked",
       status: "crafting",
       retryAt,
-      progressionPending: undefined,
+      progressionPending: { selection: "branch", value: "laborer", requiredGold: 50, currentGold: 500 },
     });
   } finally {
     globalThis.fetch = originalFetch;
   }
   assert.deepEqual(calls, ["GET /api/war/state", "GET /api/player/state"]);
+});
+
+test("battle-next set and clear make no pledge mutation while crafting locks the player", async () => {
+  const config = {
+    ...createWallet(),
+    baseUrl: "https://example.test",
+    agentKey: "agent-key",
+    profile: { direction: "miner", resources: ["iron"], goal: "resources" },
+  };
+  const retryAt = "2099-01-01T00:10:00.000Z";
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    const path = new URL(url).pathname;
+    calls.push(`${options.method ?? "GET"} ${path}`);
+    const data = path === "/api/war/state"
+      ? { nextWarAt: "2099-01-01T00:00:00.000Z" }
+      : { player: { castleId: "ashkeep", status: "crafting", lockedUntil: retryAt }, activeQuestAction: null };
+    return new Response(JSON.stringify({ data }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    await assert.rejects(setNextBattle(config, "defend"), (error) => error.code === "PLAYER_LOCKED" && error.retryAt === retryAt);
+    await assert.rejects(clearNextBattle(config), (error) => error.code === "PLAYER_LOCKED" && error.retryAt === retryAt);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(calls.some((call) => call.startsWith("POST ") || call.startsWith("DELETE ")), false);
 });
 
 test("accepts only app.renkai.xyz referral links or an explicit no-referrer choice", () => {
@@ -420,6 +447,48 @@ test("battle tick does not pledge while crafting locks the player", async () => 
     reason: "PLAYER_LOCKED",
   });
   assert.deepEqual(calls, ["GET /api/player/state"]);
+});
+
+test("crafting lock preserves ready pledges and missed-lock terminal errors", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "renkai-battle-crafting-terminal-test-"));
+  const configPath = join(directory, "agent.json");
+  const config = {
+    version: 3,
+    ...createWallet(),
+    baseUrl: "https://example.invalid",
+    agentKey: "secret",
+    profile: { direction: "miner", resources: ["iron"], goal: "resources" },
+    battle: null,
+    automation: { runtime: null, jobId: null, lastRunAt: null, lastPledgedWindowId: null, lastAlertedWindowId: null, notification: null },
+  };
+  await writeFile(configPath, JSON.stringify(config), { mode: 0o600 });
+  const request = async () => ({
+    player: { castleId: "ashkeep", status: "crafting", lockedUntil: "2026-07-18T08:10:00.000Z" },
+    activeQuestAction: null,
+  });
+  const baseWarState = {
+    nextWindowId: "war_crafting_terminal",
+    nextWarAt: "2026-07-18T08:00:00.000Z",
+    pledgeLockedAt: "2026-07-18T07:55:00.000Z",
+    policy: { mode: "defend", targetCastleId: null },
+  };
+  const ready = await battleTick(configPath, config, {
+    nowMs: Date.UTC(2026, 6, 18, 7, 45),
+    force: true,
+    warState: { ...baseWarState, pledge: { role: "defend", targetCastleId: "ashkeep" } },
+    request,
+  });
+  assert.equal(ready.action, "pledge_ready");
+
+  await assert.rejects(
+    battleTick(configPath, config, {
+      nowMs: Date.UTC(2026, 6, 18, 7, 56),
+      force: true,
+      warState: { ...baseWarState, pledge: null },
+      request,
+    }),
+    (error) => error.code === "BATTLE_PLEDGE_MISSED",
+  );
 });
 
 test("battle-next creates and clears only a one-window pledge", async () => {

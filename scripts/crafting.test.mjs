@@ -53,7 +53,6 @@ test("maps every crafting subcommand to its canonical route", async () => {
     name: "Iron Sword",
     tier: "T1",
     slot: "weapon",
-    requiredStation: "forge",
     requiredPlayerLevel: 5,
     requiredCastleId: "ashkeep",
     requiredBranch: "fighter",
@@ -219,27 +218,27 @@ test("requires target-matching confirmation before every crafting mutation", asy
     throw new Error("request should not run");
   };
   const mutations = [
-    ["start", { recipe: "recipe_1" }, "crafting start requires --confirm <recipeId> exactly matching --recipe."],
-    ["start", { recipe: "recipe_1", confirm: "recipe_2" }, "crafting start requires --confirm <recipeId> exactly matching --recipe."],
-    ["cancel", { job: "job_1" }, "crafting cancel requires --confirm <craftingJobId> exactly matching --job."],
-    ["cancel", { job: "job_1", confirm: "job_2" }, "crafting cancel requires --confirm <craftingJobId> exactly matching --job."],
-    ["claim", { job: "job_1" }, "crafting claim requires --confirm <craftingJobId> exactly matching --job."],
-    ["claim", { job: "job_1", confirm: "job_2" }, "crafting claim requires --confirm <craftingJobId> exactly matching --job."],
-    ["retry-mint", { job: "job_1" }, "crafting retry-mint requires --confirm <craftingJobId> exactly matching --job."],
-    ["retry-mint", { job: "job_1", confirm: "job_2" }, "crafting retry-mint requires --confirm <craftingJobId> exactly matching --job."],
+    ["start", { recipe: "recipe_1" }],
+    ["start", { recipe: "recipe_1", confirm: "recipe_2" }],
+    ["cancel", { job: "job_1" }],
+    ["cancel", { job: "job_1", confirm: "job_2" }],
+    ["claim", { job: "job_1" }],
+    ["claim", { job: "job_1", confirm: "job_2" }],
+    ["retry-mint", { job: "job_1" }],
+    ["retry-mint", { job: "job_1", confirm: "job_2" }],
   ];
-  for (const [subcommand, flags, message] of mutations) {
+  for (const [subcommand, flags] of mutations) {
     await assert.rejects(
       runCraftingCommand(config, subcommand, flags, { request }),
-      (error) => error instanceof Error && error.message === message,
+      (error) => error.code === "CONFIRMATION_REQUIRED",
     );
   }
   assert.equal(calls, 0);
 
-  await assert.rejects(runCraftingCommand(config, "start", {}, { request }), /crafting start requires --recipe <recipeId>\./);
-  await assert.rejects(runCraftingCommand(config, "cancel", {}, { request }), /crafting cancel requires --job <craftingJobId>\./);
-  await assert.rejects(runCraftingCommand(config, "claim", {}, { request }), /crafting claim requires --job <craftingJobId>\./);
-  await assert.rejects(runCraftingCommand(config, "retry-mint", {}, { request }), /crafting retry-mint requires --job <craftingJobId>\./);
+  await assert.rejects(runCraftingCommand(config, "start", {}, { request }), (error) => error.code === "VALIDATION_ERROR");
+  await assert.rejects(runCraftingCommand(config, "cancel", {}, { request }), (error) => error.code === "VALIDATION_ERROR");
+  await assert.rejects(runCraftingCommand(config, "claim", {}, { request }), (error) => error.code === "VALIDATION_ERROR");
+  await assert.rejects(runCraftingCommand(config, "retry-mint", {}, { request }), (error) => error.code === "VALIDATION_ERROR");
   assert.equal(calls, 0);
 });
 
