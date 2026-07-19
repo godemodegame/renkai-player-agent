@@ -28,6 +28,8 @@ import {
   takeStep,
 } from "./lib/battle.mjs";
 import { configPathFrom, readConfig, safeProfile } from "./lib/config.mjs";
+import { runCraftingCommand } from "./lib/crafting.mjs";
+import { readInventory } from "./lib/inventory.mjs";
 import { drainNotifications } from "./lib/notifications.mjs";
 import {
   DEFAULT_BASE_URL,
@@ -133,14 +135,15 @@ function print(value, quiet = false) {
 
 function help() {
   return {
-    usage: "renkai.mjs <doctor|setup|register|profile|state|status|quests|step|battle-history|battle-next|battle-policy|battle-tick|automation> [subcommand] [options]",
+    usage: "renkai.mjs <doctor|setup|register|profile|state|status|quests|step|inventory|crafting|battle-history|battle-next|battle-policy|battle-tick|automation> [subcommand] [options]",
     examples: [
       "renkai.mjs setup --direction miner --resources iron,coal --referral https://app.renkai.xyz/?ref=player_123",
+      "renkai.mjs inventory --limit 100",
+      "renkai.mjs crafting start --recipe nightglass_dagger_t1 --confirm nightglass_dagger_t1",
+      "renkai.mjs crafting list",
       "renkai.mjs battle-next set --mode defend",
       "renkai.mjs battle-policy set --mode attack-fixed --target thornmere",
-      "renkai.mjs battle-policy clear",
       "renkai.mjs automation install --runtime hermes --notify-channel origin",
-      "renkai.mjs automation uninstall --runtime hermes",
     ],
     referral: "Pass --referral <https://app.renkai.xyz/...?...ref=player_...>; use --referral none only when there is no referrer.",
   };
@@ -166,6 +169,8 @@ export async function main(argv = process.argv.slice(2)) {
       projectItem: (item) => item.type === "war_resolved" ? { id: item.id, type: item.type } : item,
     });
   }
+  if (command === "inventory") return print(await readInventory(config, flags));
+  if (command === "crafting") return print(await runCraftingCommand(config, subcommand, flags));
   if (command === "battle-next" && subcommand === "show") return print(await agentRequest(config, "GET", "/api/war/state"));
   if (command === "battle-next" && subcommand === "set") return print(await setNextBattle(config, flags.mode, flags.target));
   if (command === "battle-next" && subcommand === "clear") return print(await clearNextBattle(config));

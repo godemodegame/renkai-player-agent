@@ -35,7 +35,35 @@ Run one bounded decision at a time:
 node {baseDir}/scripts/renkai.mjs step
 ```
 
-Use the returned `action` and `retryAt`; do not busy-loop. Without a battle instruction, `step` proceeds with progression and quests normally. `step` and `status` drain notifications through the standard acknowledgement flow. A `war_resolved` item from `step` is intentionally reduced to its `{ id, type }` reference; it never inlines the result or changes strategy. Run `battle-history` explicitly to read the latest result.
+Use the returned `action` and `retryAt`; do not busy-loop. Without a battle instruction, `step` proceeds with progression and quests normally. `step` and `status` also return a `notifications` object. The CLI writes the complete primary result and unread notification payloads before acknowledging them, then records progress in the private `<config>.notifications.json` sidecar. If output, acknowledgement, or state persistence fails, rerun the command; acknowledgements are idempotent and the durable sweep prevents silent loss. A `war_resolved` item from `step` is intentionally reduced to its `{ id, type }` reference; it never inlines the result or changes strategy. Run `battle-history` explicitly to read the latest result.
+
+Inspect current state while draining notifications, or read the legacy state-only surface:
+
+```bash
+node {baseDir}/scripts/renkai.mjs status
+node {baseDir}/scripts/renkai.mjs state
+```
+
+Read the authenticated resource and gear inventory one bounded page at a time:
+
+```bash
+node {baseDir}/scripts/renkai.mjs inventory [--limit <1-100>] [--cursor <opaque-cursor>]
+```
+
+The result includes `observedAt`, explicit resource zeroes, gear instance and recipe IDs, item state, stable `nextCursor`, and castle-population `weight`; it does not claim rewards or mutate inventory.
+
+Inspect recipes and manage crafting jobs with exact target confirmation on every spend or lifecycle mutation:
+
+```bash
+node {baseDir}/scripts/renkai.mjs crafting recipes
+node {baseDir}/scripts/renkai.mjs crafting list
+node {baseDir}/scripts/renkai.mjs crafting start --recipe <recipeId> --confirm <recipeId>
+node {baseDir}/scripts/renkai.mjs crafting cancel --job <craftingJobId> --confirm <craftingJobId>
+node {baseDir}/scripts/renkai.mjs crafting claim --job <craftingJobId> --confirm <craftingJobId>
+node {baseDir}/scripts/renkai.mjs crafting retry-mint --job <craftingJobId> --confirm <craftingJobId>
+```
+
+Use `nextRecommendedPollAt` from `crafting list` or `readyAt` from `crafting start`; do not busy-loop. After a restart, resume from `crafting list`. A `failed_recoverable` mint keeps the same gear item and must use `retry-mint`, never a second `start`. Read [game-api.md](references/game-api.md) for the precise agent-facing inventory, crafting, and notification contracts.
 
 When the user specifies only the next battle, create one pledge and no scheduler:
 
@@ -67,7 +95,7 @@ node {baseDir}/scripts/renkai.mjs automation status
 node {baseDir}/scripts/renkai.mjs automation repair --runtime <hermes|openclaw> --notify-channel <channel> [--notify-to <recipient>]
 ```
 
-Use these read-only commands when explaining state:
+Use these read-only commands when explaining state without notification acknowledgement:
 
 ```bash
 node {baseDir}/scripts/renkai.mjs state

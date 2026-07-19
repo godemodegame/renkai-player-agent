@@ -1,4 +1,31 @@
-# Renkai agent API notes
+# Agent game API
+
+The CLI signs every request with the configured agent wallet and API key. Consumers should use `scripts/renkai.mjs` instead of constructing signatures directly.
+
+## Inventory
+
+`inventory [--limit <1-100>] [--cursor <opaque>]` calls authenticated `GET /api/inventory`. It returns:
+
+- `observedAt` for the read snapshot;
+- `resources.items[]` with `resourceId`, `category`, and explicit `amount`, plus `totalCount`;
+- `gear.items[]` with instance `id`, template `recipeId`, slot/tier/branch, bonuses, durability, equip/attunement/mint fields, and derived `state`;
+- `gear.nextCursor` for stable descending-ID pagination;
+- `weight.system = castle_population`, `activeWeight`, and `capacityWeight = null`.
+
+The read is owner-scoped and mutation-free. Treat the cursor as opaque and pass it unchanged.
+
+## Crafting
+
+| CLI command | HTTP request | Notes |
+| --- | --- | --- |
+| `crafting recipes` | `GET /api/crafting/recipes` | Shows station, level, branch, duration, Gold, resource costs, and bonuses. |
+| `crafting list` | `GET /api/crafting/jobs` | Resume-safe job history plus `nextRecommendedPollAt`. |
+| `crafting start --recipe R --confirm R` | `POST /api/crafting/request` | Body `{ "recipeId": "R" }`; Gold/resources are spent once. |
+| `crafting cancel --job J --confirm J` | `POST /api/crafting/cancel` | Body `{ "craftingJobId": "J" }`; spent inputs are not refunded. |
+| `crafting claim --job J --confirm J` | `POST /api/crafting/claim` | Creates the gear item once and attempts its mint. |
+| `crafting retry-mint --job J --confirm J` | `POST /api/crafting/retry-mint` | Retries minting the existing gear item; never starts a second craft. |
+
+Every mutation is idempotent. `--confirm` must exactly match the target ID. Laborer apprentices may craft laborer recipes only from levels 5 through 14; blacksmiths may craft both branches. Use the server's `readyAt`, `nextRecommendedPollAt`, `retryAt`, and status fields instead of fixed polling intervals.
 
 ## Latest war result
 
@@ -8,8 +35,8 @@ After resolution, `latestResult` contains exactly one latest window with `warWin
 
 Negative `goldDelta` means breached total loss, positive means defended total earnings, and zero requires reading the explicit outcome. The response has no older history, pagination, filters, attack or defense amounts, power, scores, totals, contributions, predictions, or other-player details.
 
-## Notification acknowledgement
+## Notification drain
 
-`status` and `step` page authenticated `GET /api/notifications`, write locally unreceived output before acknowledgement, and then use idempotent `POST /api/notifications/ack`. Delivery is at least once; rerun after a failure.
+`status` and `step` page authenticated `GET /api/notifications?limit=50`, up to 10 pages/500 rows per run. The CLI writes the primary result plus notifications before calling idempotent `POST /api/notifications/ack` in batches of at most 50. It serializes drains with a private lock and persists its watermark/sweep beside the config. When `more` is true, rerun later to continue the bounded sweep. A retry result includes `retryAt`; do not busy-loop. Delivery is at least once; rerun after a failure.
 
 `step` projects `war_resolved` to `{ "id": "...", "type": "war_resolved" }` only. It never calls `/api/war/history`, inlines the result, or changes strategy. Run `battle-history` explicitly when the result is needed.
