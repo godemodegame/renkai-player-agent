@@ -28,6 +28,7 @@ import {
   takeStep,
 } from "./lib/battle.mjs";
 import { configPathFrom, readConfig, safeProfile } from "./lib/config.mjs";
+import { drainNotifications } from "./lib/notifications.mjs";
 import {
   DEFAULT_BASE_URL,
   parseReferralInput,
@@ -132,7 +133,7 @@ function print(value, quiet = false) {
 
 function help() {
   return {
-    usage: "renkai.mjs <doctor|setup|register|profile|state|quests|step|battle-next|battle-policy|battle-tick|automation> [subcommand] [options]",
+    usage: "renkai.mjs <doctor|setup|register|profile|state|status|quests|step|battle-history|battle-next|battle-policy|battle-tick|automation> [subcommand] [options]",
     examples: [
       "renkai.mjs setup --direction miner --resources iron,coal --referral https://app.renkai.xyz/?ref=player_123",
       "renkai.mjs battle-next set --mode defend",
@@ -155,8 +156,16 @@ export async function main(argv = process.argv.slice(2)) {
   if (command === "register") return print(await register(configPath, config));
   if (command === "profile") return print(safeProfile(config));
   if (command === "state") return print(await agentRequest(config, "GET", "/api/player/state"));
+  if (command === "status") {
+    return drainNotifications(configPath, config, () => agentRequest(config, "GET", "/api/player/state"));
+  }
   if (command === "quests") return print(await agentRequest(config, "GET", "/api/quests"));
-  if (command === "step") return print(await takeStep(configPath, config));
+  if (command === "battle-history") return print(await agentRequest(config, "GET", "/api/war/history"));
+  if (command === "step") {
+    return drainNotifications(configPath, config, () => takeStep(configPath, config), {
+      projectItem: (item) => item.type === "war_resolved" ? { id: item.id, type: item.type } : item,
+    });
+  }
   if (command === "battle-next" && subcommand === "show") return print(await agentRequest(config, "GET", "/api/war/state"));
   if (command === "battle-next" && subcommand === "set") return print(await setNextBattle(config, flags.mode, flags.target));
   if (command === "battle-next" && subcommand === "clear") return print(await clearNextBattle(config));

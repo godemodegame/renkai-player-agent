@@ -3,7 +3,6 @@ import { once } from "node:events";
 import { agentRequest } from "./api.mjs";
 import {
   acquireNotificationLock,
-  emptyNotificationState,
   readNotificationState,
   releaseNotificationLock,
   writeNotificationState,
@@ -156,11 +155,10 @@ function parseArguments(configPath, config, primary, options) {
 async function listPages(config, state, options) {
   const request = options.request ?? agentRequest;
   const pages = [];
-  const seenIds = new Set();
+  const receivedIds = new Set(state.receivedIds);
+  const encounteredIds = new Set(state.sweep?.encounteredIds ?? []);
   const seenCursors = new Set();
   let cursor = state.sweep?.nextCursor ?? null;
-  let headId = state.sweep?.headId ?? null;
-  let boundary = false;
   let more = false;
   for (let pageNumber = 0; pageNumber < NOTIFICATION_MAX_PAGES; pageNumber += 1) {
     if (cursor !== null) {
@@ -168,20 +166,14 @@ async function listPages(config, state, options) {
       seenCursors.add(cursor);
     }
     const page = validatePage(await retryRequest(() => request(config, "GET", pagePath(cursor)), options));
-    if (!headId && page.items.length > 0) headId = page.items[0].id;
     const selected = [];
     for (const item of page.items) {
-      if (seenIds.has(item.id)) throw invalidPage("Notification pagination repeated an item.");
-      seenIds.add(item.id);
-      if (boundary) continue;
-      if (state.lastAcknowledgedId !== null && item.id <= state.lastAcknowledgedId) {
-        boundary = true;
-        continue;
-      }
-      if (item.readAt === null) selected.push(item);
+      if (encounteredIds.has(item.id)) throw invalidPage("Notification pagination repeated an item.");
+      encounteredIds.add(item.id);
+      if (!receivedIds.has(item.id)) selected.push(item);
     }
-    pages.push({ items: selected, nextCursor: page.nextCursor });
-    if (boundary || page.nextCursor === null) break;
+    pages.push({ items: selected, allIds: page.items.map((item) => item.id), nextCursor: page.nextCursor });
+    if (page.nextCursor === null) break;
     if (pageNumber + 1 === NOTIFICATION_MAX_PAGES) {
       more = true;
       break;
@@ -190,13 +182,7 @@ async function listPages(config, state, options) {
   }
   const items = pages.flatMap((page) => page.items);
   if (items.length > NOTIFICATION_MAX_ROWS) throw invalidPage("Notification sweep exceeded its row limit.");
-  return { pages, items, headId, more, terminal: !more && (boundary || pages.at(-1)?.nextCursor === null) };
-}
-
-function stateAfterPage(state, headId, nextCursor, terminal) {
-  return terminal
-    ? { ...emptyNotificationState(), lastAcknowledgedId: headId && (!state.lastAcknowledgedId || headId > state.lastAcknowledgedId) ? headId : state.lastAcknowledgedId }
-    : { version: 1, lastAcknowledgedId: state.lastAcknowledgedId, sweep: { headId, nextCursor } };
+  return { pages, items, more, terminal: !more && pages.at(-1)?.nextCursor === null };
 }
 
 export async function drainNotifications(configPath, config, primary, options) {
@@ -218,17 +204,26 @@ export async function drainNotifications(configPath, config, primary, options) {
       await (settings.writer ?? settings.output ?? settings.print ?? settings.write ?? writeJsonToStdout)(output);
       return output;
     }
-    const notificationResult = { status: "ready", items: listed.items, count: listed.items.length, more: listed.more };
+    const notificationResult = {
+      status: "ready",
+      items: settings.projectItem ? listed.items.map(settings.projectItem) : listed.items,
+      count: listed.items.length,
+      more: listed.more,
+    };
     const output = outputValue(primaryResult, notificationResult);
     await (settings.writer ?? settings.output ?? settings.print ?? settings.write ?? writeJsonToStdout)(output);
     const writeState = settings.writeState ?? ((path, value) => writeNotificationState(path, value));
+    const receivedIds = new Set(state.receivedIds);
+    const encounteredIds = new Set(state.sweep?.encounteredIds ?? []);
     for (let index = 0; index < listed.pages.length; index += 1) {
       const page = listed.pages[index];
       if (page.items.length > 0) await acknowledge(args.config, page.items.map((item) => item.id), settings);
+      page.items.forEach((item) => receivedIds.add(item.id));
+      page.allIds.forEach((id) => encounteredIds.add(id));
       const terminal = !listed.more && index === listed.pages.length - 1;
-      if (page.items.length > 0 || terminal || state.sweep) {
-        await writeState(args.configPath, stateAfterPage(state, listed.headId, page.nextCursor, terminal));
-      }
+      await writeState(args.configPath, terminal
+        ? { version: 2, receivedIds: [...encounteredIds], sweep: null }
+        : { version: 2, receivedIds: [...receivedIds], sweep: { nextCursor: page.nextCursor, encounteredIds: [...encounteredIds] } });
     }
     return output;
   } finally {

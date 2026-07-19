@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, stat, utimes, writeFile } from "node:fs/promises";
+import { chmod, link, mkdir, mkdtemp, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -42,7 +42,7 @@ function pagedRequest(pages, calls = []) {
   };
 }
 
-test("drains unread rows and checkpoints after output then acknowledgement", async () => {
+test("drains every unreceived row and checkpoints after output then acknowledgement", async () => {
   const { configPath } = await fixture();
   const first = Array.from({ length: 50 }, (_, index) => item(150 - index, index === 1 ? "2026-07-18T00:00:00.000Z" : null));
   const second = [item(100), item(99), item(98)];
@@ -53,33 +53,57 @@ test("drains unread rows and checkpoints after output then acknowledgement", asy
     writer: async () => { order.push("writer"); },
   });
   assert.deepEqual(order, ["primary", "writer"]);
-  assert.equal(output.notifications.count, 52);
+  assert.equal(output.notifications.count, 53);
   assert.equal(output.notifications.more, false);
-  assert.equal(output.notifications.items.some((notification) => notification.id === first[1].id), false);
+  assert.equal(output.notifications.items.some((notification) => notification.id === first[1].id), true);
   assert.deepEqual(calls.filter((call) => call.method === "GET").map((call) => call.path), [
     "/api/notifications?limit=50", "/api/notifications?limit=50&cursor=notification_0101",
   ]);
-  assert.deepEqual(calls.filter((call) => call.method === "POST").map((call) => call.body.notificationIds.length), [49, 3]);
-  assert.equal((await readNotificationState(configPath)).lastAcknowledgedId, "notification_0150");
-  assert.deepEqual(await readNotificationState(configPath), { version: 1, lastAcknowledgedId: "notification_0150", sweep: null });
+  assert.deepEqual(calls.filter((call) => call.method === "POST").map((call) => call.body.notificationIds.length), [50, 3]);
+  const completedState = await readNotificationState(configPath);
+  assert.equal(completedState.receivedIds.length, 53);
+  assert.equal(completedState.receivedIds.includes("notification_0150"), true);
+  assert.deepEqual(completedState.sweep, null);
   assert.equal((await stat(notificationStatePath(configPath))).mode & 0o777, 0o600);
   assert.deepEqual(order, ["primary", "writer"]);
+});
+
+test("projects war results to references without changing acknowledgement", async () => {
+  const { configPath } = await fixture();
+  const war = { ...item(2), type: "war_resolved", payload: { outcome: "breached", power: 999 } };
+  const quest = item(1);
+  const calls = [];
+  const output = await drainNotifications(configPath, config, async () => ({ action: "wait" }), {
+    request: pagedRequest({ first: page([war, quest]) }, calls),
+    writer: async () => {},
+    projectItem: (notification) => notification.type === "war_resolved"
+      ? { id: notification.id, type: notification.type }
+      : notification,
+  });
+
+  assert.deepEqual(output.notifications.items[0], { id: war.id, type: "war_resolved" });
+  assert.deepEqual(output.notifications.items[1], quest);
+  assert.deepEqual(calls.find((call) => call.method === "POST").body.notificationIds, [war.id, quest.id]);
 });
 
 test("resumes a bounded sweep and revisits the top for insertions", async () => {
   const { configPath } = await fixture();
   const calls = [];
-  const pages = { first: page(Array.from({ length: 50 }, (_, i) => item(1000 - i)), "notification_0951") };
+  const alreadyReadAt = "2026-07-18T00:00:00.000Z";
+  const pages = { first: page(Array.from({ length: 50 }, (_, i) => item(1000 - i, alreadyReadAt)), "notification_0951") };
   for (let pageIndex = 1; pageIndex < 10; pageIndex += 1) {
     const high = 1000 - pageIndex * 50;
-    pages[`notification_${String(high + 1).padStart(4, "0")}`] = page(Array.from({ length: 50 }, (_, i) => item(high - i)), `notification_${String(high - 49).padStart(4, "0")}`);
+    pages[`notification_${String(high + 1).padStart(4, "0")}`] = page(Array.from({ length: 50 }, (_, i) => item(high - i, alreadyReadAt)), `notification_${String(high - 49).padStart(4, "0")}`);
   }
   const callsForRun = [];
   const request = pagedRequest(pages, callsForRun);
   const firstRun = await drainNotifications(configPath, config, async () => ({ action: "status" }), { request, writer: async () => {} });
   assert.equal(firstRun.notifications.count, 500);
   assert.equal(firstRun.notifications.more, true);
-  assert.deepEqual((await readNotificationState(configPath)).sweep, { headId: "notification_1000", nextCursor: "notification_0501" });
+  const partialState = await readNotificationState(configPath);
+  assert.equal(partialState.receivedIds.length, 500);
+  assert.equal(partialState.sweep.nextCursor, "notification_0501");
+  assert.equal(partialState.sweep.encounteredIds.length, 500);
 
   const resumePages = {
     notification_0501: page(Array.from({ length: 50 }, (_, i) => item(500 - i)), "notification_0451"),
@@ -88,7 +112,11 @@ test("resumes a bounded sweep and revisits the top for insertions", async () => 
   const resumed = await drainNotifications(configPath, config, async () => ({ action: "status" }), { request: pagedRequest(resumePages, calls), writer: async () => {} });
   assert.equal(resumed.notifications.count, 99);
   assert.equal(resumed.notifications.more, false);
-  assert.deepEqual(await readNotificationState(configPath), { version: 1, lastAcknowledgedId: "notification_1000", sweep: null });
+  const resumedState = await readNotificationState(configPath);
+  assert.equal(resumedState.version, 2);
+  assert.equal(resumedState.receivedIds.length, 599);
+  assert.equal(resumedState.receivedIds.includes("notification_1000"), true);
+  assert.equal(resumedState.sweep, null);
 
   const top = [item(1001), ...Array.from({ length: 49 }, (_, i) => item(1000 - i))];
   const revisit = await drainNotifications(configPath, config, async () => ({ action: "status" }), {
@@ -132,14 +160,46 @@ test("retries a transient ack with one idempotency key and leaves state retryabl
   assert.deepEqual(await readNotificationState(configPath), emptyNotificationState());
   const success = await drainNotifications(configPath, config, async () => ({ action: "step" }), { request, writer: async () => {} });
   assert.equal(success.notifications.count, 1);
-  assert.equal((await readNotificationState(configPath)).lastAcknowledgedId, "notification_0002");
+  assert.deepEqual((await readNotificationState(configPath)).receivedIds, ["notification_0002"]);
+});
+
+test("finds web-read and nonmonotonic ids across complete receipt sweeps", async () => {
+  const { configPath } = await fixture();
+  const acknowledged = [];
+  const request = async (_config, method, _path, body) => {
+    if (method === "GET") {
+      return page([
+        { ...item(9), id: "notification_war_2099", readAt: "2026-07-19T00:00:00.000Z" },
+        item(8),
+      ]);
+    }
+    acknowledged.push(...body.notificationIds);
+    return { results: body.notificationIds.map((id) => ({ id, status: "already_acknowledged" })) };
+  };
+  const first = await drainNotifications(configPath, config, async () => ({ action: "status" }), { request, writer: async () => {} });
+  assert.equal(first.notifications.count, 2);
+
+  const nextRequest = async (_config, method, _path, body) => {
+    if (method === "GET") {
+      return page([
+        { ...item(7), id: "notification_00000000000000000000000000", readAt: "2026-07-19T00:01:00.000Z" },
+        { ...item(9), id: "notification_war_2099", readAt: "2026-07-19T00:00:00.000Z" },
+        item(8, "2026-07-19T00:00:00.000Z"),
+      ]);
+    }
+    acknowledged.push(...body.notificationIds);
+    return { results: body.notificationIds.map((id) => ({ id, status: "already_acknowledged" })) };
+  };
+  const second = await drainNotifications(configPath, config, async () => ({ action: "status" }), { request: nextRequest, writer: async () => {} });
+  assert.deepEqual(second.notifications.items.map(({ id }) => id), ["notification_00000000000000000000000000"]);
+  assert.equal(acknowledged.includes("notification_00000000000000000000000000"), true);
 });
 
 test("retries transient GETs but does not loop on validation failures", async () => {
   const { configPath } = await fixture();
   const waits = [];
   let getAttempts = 0;
-  const request = async (_config, method, path) => {
+  const request = async (_config, method, _path) => {
     if (method === "GET") {
       getAttempts += 1;
       if (getAttempts < 3) { const error = new Error("busy"); error.status = 503; throw error; }
@@ -202,6 +262,45 @@ test("locks notification drains, reclaims only genuinely stale locks, and releas
   }), (error) => Boolean(error.code === "NOTIFICATION_DRAIN_BUSY" && error.retryAt));
   assert.equal(primaryCalled, false);
   assert.equal(await releaseNotificationLock(live), true);
+});
+
+test("reclaims interrupted lock writes and stale orphan claims", async () => {
+  for (const contents of ["", "{\"token\":"]) {
+    const { configPath } = await fixture("renkai-partial-lock-");
+    const lockPath = notificationLockPath(configPath);
+    const old = Date.now() - 16 * 60 * 1000;
+    await writeFile(lockPath, contents, { mode: 0o600 });
+    const orphanPath = `${lockPath}.claim.interrupted`;
+    await link(lockPath, orphanPath);
+    await utimes(lockPath, old / 1000, old / 1000);
+    const reclaimed = await acquireNotificationLock(configPath);
+    assert.equal(await stat(orphanPath).catch((error) => error.code), "ENOENT");
+    assert.equal(await releaseNotificationLock(reclaimed), true);
+  }
+});
+
+test("always derives notification state beside the config filename", async () => {
+  const { directory } = await fixture("renkai-config-suffix-");
+  const configPath = join(directory, "agent.notifications.json");
+  assert.equal(notificationStatePath(configPath), `${configPath}.notifications.json`);
+  assert.deepEqual(await readNotificationState(configPath), emptyNotificationState());
+});
+
+test("allows only one winner when stale-lock reclamation races", async () => {
+  for (let iteration = 0; iteration < 100; iteration += 1) {
+    const { configPath } = await fixture("renkai-lock-race-");
+    const lockPath = notificationLockPath(configPath);
+    const old = Date.now() - 16 * 60 * 1000;
+    await writeFile(lockPath, JSON.stringify({ token: `stale-${iteration}`, timestamp: old }), { mode: 0o600 });
+    await utimes(lockPath, old / 1000, old / 1000);
+    const outcomes = await Promise.allSettled([
+      acquireNotificationLock(configPath),
+      acquireNotificationLock(configPath),
+    ]);
+    const winners = outcomes.filter(({ status }) => status === "fulfilled");
+    assert.equal(winners.length, 1);
+    assert.equal(await releaseNotificationLock(winners[0].value), true);
+  }
 });
 
 test("sidecar writes are mode 0600 and use the config-derived path", async () => {

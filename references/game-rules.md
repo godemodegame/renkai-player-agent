@@ -54,8 +54,10 @@ All common resources can eventually drop in every castle. Castle-biased and rare
 - `defend` always pledges the assigned castle; `attack_fixed` always uses the chosen foreign castle; `attack_cycle` deterministically rotates through every foreign castle by eight-hour slot.
 - A quest that would overlap the reserve is rejected with `WAR_PARTICIPATION_RESERVED`. A shorter quest started earlier keeps any existing pledge.
 - A policy is optional and editable. Clearing it before lock cancels the current pledge; after lock it stops participation from the next window.
+- A `war_resolved` item from `step` is only a notification reference. Read the latest fully resolved all-castle snapshot with `battle-history`; do not infer hidden power, fetch older history, or change strategy automatically.
 
 - Poll at the server-provided time or after the active lock expires; never busy-loop.
 - Reuse the same idempotency key only when replaying the exact same mutation.
+- `status` emits locally unreceived notification payloads before acknowledgement. `step` does the same except that `war_resolved` is reduced to its id/type reference. On an error, rerun rather than discarding or deduplicating payloads yourself.
 - Treat `FEATURE_DISABLED` as an operator gate and `FORBIDDEN` during registration as a whitelist gate.
 - Treat branch/class selections as permanent.

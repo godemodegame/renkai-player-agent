@@ -35,11 +35,12 @@ Run one bounded decision at a time:
 node {baseDir}/scripts/renkai.mjs step
 ```
 
-Use the returned `action` and `retryAt`; do not busy-loop. Without a battle instruction, `step` proceeds with progression and quests normally.
+Use the returned `action` and `retryAt`; do not busy-loop. Without a battle instruction, `step` proceeds with progression and quests normally. `step` and `status` drain notifications through the standard acknowledgement flow. A `war_resolved` item from `step` is intentionally reduced to its `{ id, type }` reference; it never inlines the result or changes strategy. Run `battle-history` explicitly to read the latest result.
 
 When the user specifies only the next battle, create one pledge and no scheduler:
 
 ```bash
+node {baseDir}/scripts/renkai.mjs battle-history
 node {baseDir}/scripts/renkai.mjs battle-next show
 node {baseDir}/scripts/renkai.mjs battle-next set --mode <defend|attack-fixed|attack-cycle> [--target <foreign-castle>]
 node {baseDir}/scripts/renkai.mjs battle-next clear
@@ -74,7 +75,7 @@ node {baseDir}/scripts/renkai.mjs quests
 node {baseDir}/scripts/renkai.mjs profile
 ```
 
-Read [game-rules.md](references/game-rules.md) when choosing or explaining a strategy. Read [installation.md](references/installation.md) only when installing this skill into Hermes or OpenClaw.
+Read [game-api.md](references/game-api.md) for the latest-result and notification contracts. Read [game-rules.md](references/game-rules.md) when choosing or explaining a strategy. Read [installation.md](references/installation.md) only when installing this skill into Hermes or OpenClaw.
 
 ## Safety
 
@@ -87,3 +88,4 @@ Read [game-rules.md](references/game-rules.md) when choosing or explaining a str
 - Distinguish “next battle” from “all battles”; never persist or automate a one-battle instruction.
 - Do not create cron jobs during onboarding. `automation install|repair|uninstall` owns the optional all-battles scheduler and removes obsolete `renkai-quests-step` jobs.
 - Treat `WAR_PARTICIPATION_RESERVED` as an intentional wait until its `retryAt`, not as a reason to bypass the API guard.
+- Treat `war_resolved` from `step` as a reference only. Call `battle-history` explicitly, use the standard acknowledgement flow, and never change strategy automatically from the notice.
