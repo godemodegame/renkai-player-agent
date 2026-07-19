@@ -324,7 +324,10 @@ test("serializes stale takeover so a second owner cannot replace the canonical l
     },
   });
   await paused;
-  await assert.rejects(acquireNotificationLock(configPath), (error) => error.code === "NOTIFICATION_DRAIN_BUSY");
+  await assert.rejects(
+    acquireNotificationLock(configPath, { now: Date.now() + 16 * 60 * 1000 }),
+    (error) => error.code === "NOTIFICATION_DRAIN_BUSY",
+  );
   assert.equal(JSON.parse(await readFile(lockPath, "utf8")).token, "stale-paused");
   resumeTakeover();
   const owner = await first;

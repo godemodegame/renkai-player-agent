@@ -112,7 +112,7 @@ async function claimNotificationLock(lockPath, candidate, now = () => Date.now()
   let handle;
   try {
     handle = await open(claimPath, "wx", 0o600);
-    await handle.writeFile(`${JSON.stringify({ token: randomUUID(), timestamp: now() })}\n`);
+    await handle.writeFile(`${JSON.stringify({ token: randomUUID(), pid: process.pid, timestamp: now() })}\n`);
     await handle.close();
     handle = null;
     await chmod(claimPath, 0o600);
@@ -157,13 +157,23 @@ async function cleanupStaleLockClaims(lockPath, now) {
     const file = await lstat(claimPath).catch(() => null);
     if (!file) return;
     let recordedAt = file.mtimeMs;
+    let ownerPid = null;
     try {
       const record = JSON.parse(await readFile(claimPath, "utf8"));
+      if (Number.isInteger(record.pid) && record.pid > 0) ownerPid = record.pid;
       const rawTimestamp = record.timestamp ?? record.createdAt;
       const parsed = typeof rawTimestamp === "number" ? rawTimestamp : Date.parse(rawTimestamp);
       if (Number.isFinite(parsed)) recordedAt = parsed;
     } catch {
       // Legacy or interrupted claim files fall back to their own modification time.
+    }
+    if (ownerPid !== null) {
+      try {
+        process.kill(ownerPid, 0);
+        return;
+      } catch (error) {
+        if (error?.code !== "ESRCH") return;
+      }
     }
     if (recordedAt < cutoff) await unlink(claimPath).catch(() => {});
   }));
