@@ -68,6 +68,15 @@ async function ensureBattlePledge(configPath, config, warState, nowMs, request =
     throw error;
   }
   const playerState = await request(config, "GET", "/api/player/state");
+  const playerStatus = playerState.player.status;
+  if (playerState.activeQuestAction || (typeof playerStatus === "string" && playerStatus !== "idle" && playerStatus !== "rest")) {
+    return {
+      action: "retry",
+      windowId: warState.nextWindowId,
+      retryAt: playerState.activeQuestAction?.lockedUntil ?? playerState.player.lockedUntil,
+      reason: "PLAYER_LOCKED",
+    };
+  }
   const desired = desiredPledge(warState.policy, playerState.player.castleId, warState.nextWarAt);
   if (warState.pledge?.role === desired.role && warState.pledge?.targetCastleId === desired.targetCastleId) {
     config.automation.lastRunAt = new Date(nowMs).toISOString();
@@ -159,6 +168,21 @@ export async function battleTick(configPath, config, options = {}) {
 export async function takeStep(configPath, config) {
   const nowMs = Date.now();
   const warState = await agentRequest(config, "GET", "/api/war/state");
+  const state = await agentRequest(config, "GET", "/api/player/state");
+  const player = state.player;
+  const desiredClass = config.profile.direction;
+  const desiredBranch = BRANCH_BY_DIRECTION[desiredClass];
+  const progressionPending = player.level >= 5 && !player.branch
+    ? { selection: "branch", value: desiredBranch, requiredGold: 50, currentGold: player.gold }
+    : player.level >= 15 && player.branch && !player.class
+      ? { selection: "class", value: desiredClass, requiredGold: 100, currentGold: player.gold }
+      : undefined;
+  if (state.activeQuestAction) {
+    return { action: "wait", reason: "quest_in_progress", quest: state.activeQuestAction.questName, retryAt: state.activeQuestAction.lockedUntil };
+  }
+  if (player.status !== "idle" && player.status !== "rest") {
+    return { action: "wait", reason: "player_locked", status: player.status, retryAt: player.lockedUntil, progressionPending };
+  }
   const inReserve = nowMs >= Date.parse(warState.nextWarAt) - WAR_RESERVE_MS && nowMs < Date.parse(warState.nextWarAt);
   if (warState.policy && inReserve) {
     const battle = await ensureBattlePledge(configPath, config, warState, nowMs);
@@ -167,26 +191,11 @@ export async function takeStep(configPath, config) {
   if (warState.pledge && inReserve) {
     return { action: "wait", reason: "next_battle_reserved", pledge: warState.pledge, retryAt: warState.nextWarAt };
   }
-  const state = await agentRequest(config, "GET", "/api/player/state");
-  const player = state.player;
-  if (state.activeQuestAction) {
-    return { action: "wait", reason: "quest_in_progress", quest: state.activeQuestAction.questName, retryAt: state.activeQuestAction.lockedUntil };
-  }
-  const desiredClass = config.profile.direction;
-  const desiredBranch = BRANCH_BY_DIRECTION[desiredClass];
   if (player.level >= 5 && !player.branch && player.gold >= 50) {
     return { action: "selected_branch", branch: desiredBranch, result: await agentRequest(config, "POST", "/api/player/branch", { branch: desiredBranch }, { idempotent: true }) };
   }
   if (player.level >= 15 && player.branch && !player.class && player.gold >= 100) {
     return { action: "selected_class", class: desiredClass, result: await agentRequest(config, "POST", "/api/player/class", { class: desiredClass }, { idempotent: true }) };
-  }
-  const progressionPending = player.level >= 5 && !player.branch
-    ? { selection: "branch", value: desiredBranch, requiredGold: 50, currentGold: player.gold }
-    : player.level >= 15 && player.branch && !player.class
-      ? { selection: "class", value: desiredClass, requiredGold: 100, currentGold: player.gold }
-      : undefined;
-  if (player.status !== "idle" && player.status !== "rest") {
-    return { action: "wait", reason: "player_locked", status: player.status, retryAt: player.lockedUntil, progressionPending };
   }
   if (player.currentStamina < 1) return { action: "wait", reason: "no_stamina", retryAt: player.nextStaminaAt, progressionPending };
   const questData = await agentRequest(config, "GET", "/api/quests");

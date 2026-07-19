@@ -24,6 +24,7 @@ import {
   signRequest,
   uninstallAutomation,
 } from "./renkai.mjs";
+import { takeStep } from "./lib/battle.mjs";
 
 function base58Decode(value) {
   const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -197,6 +198,49 @@ test("step emits only a war notification reference and acknowledges its original
   });
 });
 
+test("step makes no competing mutation while crafting locks the player", async () => {
+  const config = {
+    ...createWallet(),
+    baseUrl: "https://example.test",
+    agentKey: "agent-key",
+    profile: { direction: "miner", resources: ["iron"], goal: "resources" },
+  };
+  const retryAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    const path = new URL(url).pathname;
+    calls.push(`${options.method ?? "GET"} ${path}`);
+    const data = path === "/api/war/state"
+      ? { nextWarAt: retryAt, policy: { mode: "attack-fixed", targetCastleId: "thornmere" }, pledge: null }
+      : {
+        player: {
+          level: 20,
+          branch: "laborer",
+          class: "miner",
+          gold: 500,
+          status: "crafting",
+          lockedUntil: retryAt,
+          currentStamina: 10,
+        },
+        activeQuestAction: null,
+      };
+    return new Response(JSON.stringify({ data }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    assert.deepEqual(await takeStep("/tmp/renkai-crafting-lock.json", config), {
+      action: "wait",
+      reason: "player_locked",
+      status: "crafting",
+      retryAt,
+      progressionPending: undefined,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.deepEqual(calls, ["GET /api/war/state", "GET /api/player/state"]);
+});
+
 test("accepts only app.renkai.xyz referral links or an explicit no-referrer choice", () => {
   assert.deepEqual(parseReferralInput("https://app.renkai.xyz/start?ref=player_abc-123&utm_source=agent"), {
     referrerPlayerId: "player_abc-123",
@@ -335,6 +379,47 @@ test("battle tick treats no policy and no pledge as a valid opt-out", async () =
     pledge: null,
     nextWarAt: "2026-07-18T08:00:00.000Z",
   });
+});
+
+test("battle tick does not pledge while crafting locks the player", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "renkai-battle-crafting-lock-test-"));
+  const configPath = join(directory, "agent.json");
+  const config = {
+    version: 3,
+    ...createWallet(),
+    baseUrl: "https://example.invalid",
+    agentKey: "secret",
+    profile: { direction: "miner", resources: ["iron"], goal: "resources" },
+    battle: null,
+    automation: { runtime: null, jobId: null, lastRunAt: null, lastPledgedWindowId: null, lastAlertedWindowId: null, notification: null },
+  };
+  const retryAt = "2026-07-18T08:10:00.000Z";
+  const calls = [];
+  const result = await battleTick(configPath, config, {
+    nowMs: Date.UTC(2026, 6, 18, 7, 45),
+    force: true,
+    warState: {
+      nextWindowId: "war_crafting_lock",
+      nextWarAt: "2026-07-18T08:00:00.000Z",
+      pledgeLockedAt: "2026-07-18T07:55:00.000Z",
+      policy: { mode: "attack_fixed", targetCastleId: "thornmere" },
+      pledge: null,
+    },
+    request: async (_config, method, path) => {
+      calls.push(`${method} ${path}`);
+      return {
+        player: { castleId: "ashkeep", status: "crafting", lockedUntil: retryAt },
+        activeQuestAction: null,
+      };
+    },
+  });
+  assert.deepEqual(result, {
+    action: "retry",
+    windowId: "war_crafting_lock",
+    retryAt,
+    reason: "PLAYER_LOCKED",
+  });
+  assert.deepEqual(calls, ["GET /api/player/state"]);
 });
 
 test("battle-next creates and clears only a one-window pledge", async () => {
