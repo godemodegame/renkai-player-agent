@@ -20,6 +20,7 @@ The read is owner-scoped and mutation-free. Treat the cursor as opaque and pass 
 | --- | --- | --- |
 | `crafting recipes` | `GET /api/crafting/recipes` | Shows station, level, branch, duration, Gold, resource costs, and bonuses. |
 | `crafting list` | `GET /api/crafting/jobs` | Resume-safe job history plus `nextRecommendedPollAt`. |
+| `crafting status --job J` | `GET /api/crafting/jobs` | Selects job `J` from the validated history and preserves `nextRecommendedPollAt`. |
 | `crafting start --recipe R --confirm R` | `POST /api/crafting/request` | Body `{ "recipeId": "R" }`; Gold/resources are spent once. |
 | `crafting cancel --job J --confirm J` | `POST /api/crafting/cancel` | Body `{ "craftingJobId": "J" }`; spent inputs are not refunded. |
 | `crafting claim --job J --confirm J` | `POST /api/crafting/claim` | Creates the gear item once and attempts its mint. |

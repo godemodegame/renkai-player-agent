@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Standalone Renkai player skill and zero-dependency CLI for Hermes and OpenClaw agents.",
   "scripts": {
-    "check": "node --check scripts/renkai.mjs && npm test",
+    "check": "node --check scripts/renkai.mjs && node --check scripts/deployed-crafting-smoke.mjs && npm test",
+    "smoke:crafting": "node scripts/deployed-crafting-smoke.mjs",
     "test": "node --test scripts/*.test.mjs"
   },
   "engines": {

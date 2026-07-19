@@ -141,6 +141,7 @@ function help() {
       "renkai.mjs inventory --limit 100",
       "renkai.mjs crafting start --recipe nightglass_dagger_t1 --confirm nightglass_dagger_t1",
       "renkai.mjs crafting list",
+      "renkai.mjs crafting status --job craft_job_123",
       "renkai.mjs battle-next set --mode defend",
       "renkai.mjs battle-policy set --mode attack-fixed --target thornmere",
       "renkai.mjs automation install --runtime hermes --notify-channel origin",
@@ -193,7 +194,6 @@ export async function main(argv = process.argv.slice(2)) {
       state: await agentRequest(config, "GET", "/api/player/state"),
     }));
   }
-  if (command === "inventory") return print(await readInventory(config, flags));
   if (command === "crafting") {
     const isMutation = ["start", "cancel", "claim", "retry-mint"].includes(subcommand);
     const result = await runCraftingCommand(config, subcommand, flags, {

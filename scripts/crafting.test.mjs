@@ -116,6 +116,12 @@ test("maps every crafting subcommand to its canonical route", async () => {
       nextRecommendedPollAt: readyAt,
     });
 
+    const status = await runCraftingCommand(config, "status", { job: jobId }, options);
+    assert.deepEqual(status, {
+      job: list.jobs[0],
+      nextRecommendedPollAt: readyAt,
+    });
+
     const started = await runCraftingCommand(config, "start", { recipe: recipe.id, confirm: recipe.id }, options);
     assert.deepEqual(started, { craftingJobId: jobId, readyAt, nextRecommendedPollAt: readyAt });
 
@@ -131,6 +137,7 @@ test("maps every crafting subcommand to its canonical route", async () => {
 
   assert.deepEqual(calls.map(({ method, path, body }) => ({ method, path, body })), [
     { method: "GET", path: "/api/crafting/recipes", body: undefined },
+    { method: "GET", path: "/api/crafting/jobs", body: undefined },
     { method: "GET", path: "/api/crafting/jobs", body: undefined },
     { method: "POST", path: "/api/crafting/request", body: { recipeId: recipe.id } },
     { method: "POST", path: "/api/crafting/cancel", body: { craftingJobId: jobId } },
@@ -183,6 +190,25 @@ test("preserves crafting polling hints and keeps legacy responses data-only", as
     requestWithMetadata: async () => ({ data: { jobs: [completedJob] } }),
   });
   assert.deepEqual(noHint, { jobs: [completedJob], nextRecommendedPollAt: null });
+});
+
+test("requires an exact job for crafting status without synthesizing polling metadata", async () => {
+  const config = testConfig();
+  let calls = 0;
+  const requestWithMetadata = async () => {
+    calls += 1;
+    return { data: { jobs: [] }, nextRecommendedPollAt: null };
+  };
+  await assert.rejects(
+    runCraftingCommand(config, "status", {}, { requestWithMetadata }),
+    /crafting status requires --job <craftingJobId>\./,
+  );
+  assert.equal(calls, 0);
+  await assert.rejects(
+    runCraftingCommand(config, "status", { job: "missing_job" }, { requestWithMetadata }),
+    (error) => error.code === "NOT_FOUND" && error.message === "Crafting job not found: missing_job.",
+  );
+  assert.equal(calls, 1);
 });
 
 test("rejects cleartext remote API origins before signing or fetch", async () => {

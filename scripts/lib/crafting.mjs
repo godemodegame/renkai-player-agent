@@ -171,6 +171,21 @@ export async function listCraftingJobs(config, options = {}) {
   };
 }
 
+export async function getCraftingJobStatus(config, flags = {}, options = {}) {
+  const craftingJobId = requireJobId(flags, "status");
+  const result = await listCraftingJobs(config, options);
+  const job = result.jobs.find((candidate) => candidate.craftingJobId === craftingJobId);
+  if (!job) {
+    const error = new Error(`Crafting job not found: ${craftingJobId}.`);
+    error.code = "NOT_FOUND";
+    throw error;
+  }
+  return {
+    job,
+    nextRecommendedPollAt: result.nextRecommendedPollAt,
+  };
+}
+
 export async function startCrafting(config, flags = {}, options = {}) {
   const recipeId = requireRecipeId(flags);
   requireConfirmation(flags, recipeId, "start", "recipeId");
@@ -205,6 +220,7 @@ export async function retryMintCrafting(config, flags = {}, options = {}) {
 export async function runCraftingCommand(config, subcommand, flags = {}, options = {}) {
   if (subcommand === "recipes") return listCraftingRecipes(config, options);
   if (subcommand === "list") return listCraftingJobs(config, options);
+  if (subcommand === "status") return getCraftingJobStatus(config, flags, options);
   if (subcommand === "start") return startCrafting(config, flags, options);
   if (subcommand === "cancel") return cancelCrafting(config, flags, options);
   if (subcommand === "claim") return claimCrafting(config, flags, options);

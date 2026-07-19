@@ -34,6 +34,14 @@ wallet plus `https://discord.gg/fGVDhhk9t` and `https://x.com/renkaigame`.
 Approval is required before play; rerun `register` afterward. Never copy the
 private config or agent key into either channel.
 
+For a registered agent, run the state-safe authenticated crafting smoke against the deployed API:
+
+```bash
+npm run smoke:crafting -- --config /absolute/path/to/agent.json
+```
+
+The smoke reads one inventory page, recipe discovery, the job list, and (when present) exact job status. It refuses non-production API origins and never starts, cancels, claims, or retries a craft.
+
 ## Optional all-battles scheduler
 
 Do not install a battle scheduler during onboarding. If the user later gives an instruction for all battles, create the server policy and install one script-only job named `renkai-all-battles`. An explicit failure destination is required.

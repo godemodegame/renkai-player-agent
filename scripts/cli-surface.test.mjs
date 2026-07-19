@@ -71,11 +71,12 @@ test("exports the complete legacy surface", () => {
 test("prints stable help before config access", async () => {
   const { output } = await withCapturedStdout(() => cli.main(["help", "--config", "/missing/renkai-agent.json"]));
   const help = JSON.parse(output);
-  assert.equal(help.usage, "renkai.mjs <doctor|setup|register|profile|state|status|quests|step|inventory|crafting|battle-next|battle-policy|battle-tick|automation> [subcommand] [options]");
+  assert.equal(help.usage, "renkai.mjs <doctor|setup|register|profile|state|status|quests|step|inventory|crafting|battle-history|battle-next|battle-policy|battle-tick|automation> [subcommand] [options]");
   assert.equal(Array.isArray(help.examples), true);
-  assert.equal(help.examples.length, 7);
+  assert.equal(help.examples.length, 8);
   assert.match(help.examples.join("\n"), /inventory --limit 100/);
   assert.match(help.examples.join("\n"), /crafting start/);
+  assert.match(help.examples.join("\n"), /crafting status --job/);
   assert.match(help.referral, /--referral/);
   assert.match(help.crafting, /do not refund/);
 });
