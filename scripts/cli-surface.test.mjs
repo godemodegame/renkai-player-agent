@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import * as cli from "./renkai.mjs";
+import { readMutationState } from "./lib/mutations.mjs";
 
 const LEGACY_EXPORTS = [
   "automationStatus",
@@ -53,8 +54,9 @@ function testConfig() {
 async function withCapturedStdout(action) {
   const writes = [];
   const originalWrite = process.stdout.write;
-  process.stdout.write = (chunk) => {
+  process.stdout.write = (chunk, callback) => {
     writes.push(String(chunk));
+    if (typeof callback === "function") callback();
     return true;
   };
   try {
@@ -73,10 +75,9 @@ test("prints stable help before config access", async () => {
   const help = JSON.parse(output);
   assert.equal(help.usage, "renkai.mjs <doctor|setup|register|profile|state|status|quests|step|inventory|crafting|battle-history|battle-next|battle-policy|battle-tick|automation> [subcommand] [options]");
   assert.equal(Array.isArray(help.examples), true);
-  assert.equal(help.examples.length, 8);
+  assert.equal(help.examples.length, 7);
   assert.match(help.examples.join("\n"), /inventory --limit 100/);
   assert.match(help.examples.join("\n"), /crafting start/);
-  assert.match(help.examples.join("\n"), /crafting status --job/);
   assert.match(help.referral, /--referral/);
   assert.match(help.crafting, /do not refund/);
 });
@@ -148,6 +149,31 @@ test("routes inventory and crafting through the executable surface", async () =>
     { method: "GET", path: "/api/inventory?limit=25&cursor=cursor_1", body: undefined },
     { method: "POST", path: "/api/crafting/request", body: { recipeId: "nightglass_dagger_t1" } },
   ]);
+});
+
+test("keeps a crafting receipt pending until stdout confirms delivery", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "renkai-cli-output-"));
+  const configPath = join(directory, "agent.json");
+  await writeFile(configPath, JSON.stringify(testConfig()), { mode: 0o600 });
+  const originalFetch = globalThis.fetch;
+  const originalWrite = process.stdout.write;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    data: { craftingJobId: "job_output", readyAt: "2099-01-01T00:01:00.000Z" },
+  }), { status: 200, headers: { "Content-Type": "application/json" } });
+  process.stdout.write = (_chunk, callback) => {
+    callback(new Error("stdout closed before flush"));
+    return false;
+  };
+  try {
+    await assert.rejects(
+      cli.main(["crafting", "start", "--recipe", "recipe_output", "--confirm", "recipe_output", "--config", configPath]),
+      /stdout closed before flush/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalWrite;
+  }
+  assert.equal((await readMutationState(configPath)).pending.operation.includes("recipe_output"), true);
 });
 
 test("status writes unreceived notifications before acknowledgement", async () => {

@@ -40,7 +40,7 @@ For a registered agent, run the state-safe authenticated crafting smoke against 
 npm run smoke:crafting -- --config /absolute/path/to/agent.json
 ```
 
-The smoke reads one inventory page, recipe discovery, the job list, and (when present) exact job status. It refuses non-production API origins and never starts, cancels, claims, or retries a craft.
+The smoke reads one inventory page, recipe discovery, and the job list with current statuses. It refuses non-production API origins and never starts, cancels, claims, or retries a craft.
 
 ## Optional all-battles scheduler
 

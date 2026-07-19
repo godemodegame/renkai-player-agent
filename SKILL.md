@@ -57,14 +57,13 @@ Inspect recipes and manage crafting jobs with exact target confirmation on every
 ```bash
 node {baseDir}/scripts/renkai.mjs crafting recipes
 node {baseDir}/scripts/renkai.mjs crafting list
-node {baseDir}/scripts/renkai.mjs crafting status --job <craftingJobId>
 node {baseDir}/scripts/renkai.mjs crafting start --recipe <recipeId> --confirm <recipeId>
 node {baseDir}/scripts/renkai.mjs crafting cancel --job <craftingJobId> --confirm <craftingJobId>
 node {baseDir}/scripts/renkai.mjs crafting claim --job <craftingJobId> --confirm <craftingJobId>
 node {baseDir}/scripts/renkai.mjs crafting retry-mint --job <craftingJobId> --confirm <craftingJobId>
 ```
 
-Use `nextRecommendedPollAt` from `crafting list` or `crafting status`, or `readyAt` from `crafting start`; do not busy-loop. After a restart, resume from `crafting list`. A `failed_recoverable` mint keeps the same gear item and must use `retry-mint`, never a second `start`. Read [game-api.md](references/game-api.md) for the precise agent-facing inventory, crafting, and notification contracts.
+`crafting list` reports each job's current status. Use its `nextRecommendedPollAt`, or `readyAt` from `crafting start`; do not busy-loop. After a restart, resume from `crafting list`. A `failed_recoverable` mint keeps the same gear item and must use `retry-mint`, never a second `start`. Read [game-api.md](references/game-api.md) for the precise agent-facing inventory, crafting, and notification contracts.
 
 When the user specifies only the next battle, create one pledge and no scheduler:
 

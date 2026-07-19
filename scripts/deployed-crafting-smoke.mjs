@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { configPathFrom, readConfig } from "./lib/config.mjs";
-import { getCraftingJobStatus, listCraftingJobs, listCraftingRecipes } from "./lib/crafting.mjs";
+import { listCraftingJobs, listCraftingRecipes } from "./lib/crafting.mjs";
 import { readInventory } from "./lib/inventory.mjs";
 
 const DEPLOYED_API_ORIGIN = "https://api.renkai.xyz";
@@ -37,10 +37,6 @@ async function main(argv = process.argv.slice(2)) {
     listCraftingRecipes(config),
     listCraftingJobs(config),
   ]);
-  const firstJob = jobs.jobs[0] ?? null;
-  const status = firstJob
-    ? await getCraftingJobStatus(config, { job: firstJob.craftingJobId })
-    : null;
   return {
     ok: true,
     baseUrl: config.baseUrl,
@@ -53,8 +49,8 @@ async function main(argv = process.argv.slice(2)) {
     crafting: {
       recipeCount: recipes.recipes.length,
       jobCount: jobs.jobs.length,
-      statusCheckedJobId: status?.job.craftingJobId ?? null,
-      nextRecommendedPollAt: status?.nextRecommendedPollAt ?? jobs.nextRecommendedPollAt,
+      newestJobId: jobs.jobs[0]?.craftingJobId ?? null,
+      nextRecommendedPollAt: jobs.nextRecommendedPollAt,
     },
   };
 }

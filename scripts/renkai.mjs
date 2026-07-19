@@ -133,6 +133,15 @@ function print(value, quiet = false) {
   if (!quiet) process.stdout.write(JSON.stringify(value, null, 2) + "\n");
 }
 
+function printDurably(value) {
+  return new Promise((resolve, reject) => {
+    process.stdout.write(`${JSON.stringify(value, null, 2)}\n`, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
 function help() {
   return {
     usage: "renkai.mjs <doctor|setup|register|profile|state|status|quests|step|inventory|crafting|battle-history|battle-next|battle-policy|battle-tick|automation> [subcommand] [options]",
@@ -141,7 +150,6 @@ function help() {
       "renkai.mjs inventory --limit 100",
       "renkai.mjs crafting start --recipe nightglass_dagger_t1 --confirm nightglass_dagger_t1",
       "renkai.mjs crafting list",
-      "renkai.mjs crafting status --job craft_job_123",
       "renkai.mjs battle-next set --mode defend",
       "renkai.mjs battle-policy set --mode attack-fixed --target thornmere",
       "renkai.mjs automation install --runtime hermes --notify-channel origin",
@@ -198,7 +206,7 @@ export async function main(argv = process.argv.slice(2)) {
     const isMutation = ["start", "cancel", "claim", "retry-mint"].includes(subcommand);
     const result = await runCraftingCommand(config, subcommand, flags, {
       configPath,
-      ...(isMutation ? { onResult: (value) => print(value) } : {}),
+      ...(isMutation ? { onResult: printDurably } : {}),
     });
     return isMutation ? result : print(result);
   }

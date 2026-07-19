@@ -71,7 +71,10 @@ function redactValue(value, secrets) {
   }
   if (Array.isArray(value)) return value.map((item) => redactValue(item, secrets));
   if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactValue(item, secrets)]));
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+      redactValue(key, secrets),
+      redactValue(item, secrets),
+    ]));
   }
   return value;
 }
@@ -79,7 +82,9 @@ function redactValue(value, secrets) {
 function redactAgentError(error, config) {
   const secrets = [config.agentKey, config.privateKeyPkcs8].filter((value) => typeof value === "string" && value.length > 0);
   if (!secrets.length || !error || typeof error !== "object") return error;
-  if (typeof error.message === "string") error.message = redactValue(error.message, secrets);
+  for (const key of ["message", "code", "retryAt"]) {
+    if (typeof error[key] === "string") error[key] = redactValue(error[key], secrets);
+  }
   if (error.details !== undefined) error.details = redactValue(error.details, secrets);
   return error;
 }

@@ -38,7 +38,7 @@ export async function readMutationState(configPath) {
 
 function definitelyNotCommitted(error) {
   const status = Number(error?.status);
-  return status >= 400 && status < 500 && error?.code !== "IDEMPOTENCY_IN_FLIGHT";
+  return status >= 400 && status < 500 && status !== 408 && error?.code !== "IDEMPOTENCY_IN_FLIGHT";
 }
 
 export async function runDurableMutation(configPath, operation, execute, onResult) {

@@ -213,6 +213,7 @@ test("fails closed on malformed inventory success payloads", async () => {
   for (const payload of [
     {},
     { ...inventoryPayload(), observedAt: "not-a-time" },
+    { ...inventoryPayload(), observedAt: "2026" },
     { ...inventoryPayload(), resources: { items: [{}], totalCount: 1 } },
     { ...inventoryPayload(), gear: { items: [{}], nextCursor: null } },
   ]) {

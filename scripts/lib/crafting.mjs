@@ -63,7 +63,9 @@ function isNullableString(value) {
 }
 
 function isTimestamp(value) {
-  return isString(value) && Number.isFinite(Date.parse(value));
+  if (!isString(value) || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) return false;
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value;
 }
 
 function isNumberRecord(value) {
@@ -141,7 +143,8 @@ function validateCancel(value, craftingJobId) {
 function validateClaim(value, command) {
   const result = requireObject(value, command);
   if (!result.craft || typeof result.craft !== "object" || !isString(result.craft.gearItemId)
-    || !["complete", "failed_recoverable"].includes(result.craft.mintStatus)) throw invalidResponse(command);
+    || !["complete", "failed_recoverable"].includes(result.craft.mintStatus)
+    || (result.craft.mintStatus === "complete" && !isString(result.craft.mintAddress))) throw invalidResponse(command);
   return result;
 }
 
@@ -168,21 +171,6 @@ export async function listCraftingJobs(config, options = {}) {
   return {
     jobs: result.jobs,
     nextRecommendedPollAt,
-  };
-}
-
-export async function getCraftingJobStatus(config, flags = {}, options = {}) {
-  const craftingJobId = requireJobId(flags, "status");
-  const result = await listCraftingJobs(config, options);
-  const job = result.jobs.find((candidate) => candidate.craftingJobId === craftingJobId);
-  if (!job) {
-    const error = new Error(`Crafting job not found: ${craftingJobId}.`);
-    error.code = "NOT_FOUND";
-    throw error;
-  }
-  return {
-    job,
-    nextRecommendedPollAt: result.nextRecommendedPollAt,
   };
 }
 
@@ -220,7 +208,6 @@ export async function retryMintCrafting(config, flags = {}, options = {}) {
 export async function runCraftingCommand(config, subcommand, flags = {}, options = {}) {
   if (subcommand === "recipes") return listCraftingRecipes(config, options);
   if (subcommand === "list") return listCraftingJobs(config, options);
-  if (subcommand === "status") return getCraftingJobStatus(config, flags, options);
   if (subcommand === "start") return startCrafting(config, flags, options);
   if (subcommand === "cancel") return cancelCrafting(config, flags, options);
   if (subcommand === "claim") return claimCrafting(config, flags, options);

@@ -68,6 +68,12 @@ function isNullableString(value) {
   return value === null || isString(value);
 }
 
+function isTimestamp(value) {
+  if (!isString(value) || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) return false;
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value;
+}
+
 function isNumberRecord(value) {
   return isRecord(value) && Object.entries(value).every(([key, amount]) => key.length > 0 && Number.isFinite(amount));
 }
@@ -89,7 +95,7 @@ function isGear(item) {
 }
 
 function validateInventory(value) {
-  if (!isRecord(value) || !isString(value.observedAt) || !Number.isFinite(Date.parse(value.observedAt))
+  if (!isRecord(value) || !isTimestamp(value.observedAt)
     || !isRecord(value.resources) || !Array.isArray(value.resources.items) || !value.resources.items.every(isResource)
     || !Number.isInteger(value.resources.totalCount) || value.resources.totalCount < value.resources.items.length
     || !isRecord(value.gear) || !Array.isArray(value.gear.items) || !value.gear.items.every(isGear)

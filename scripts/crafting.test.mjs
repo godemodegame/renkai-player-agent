@@ -116,12 +116,6 @@ test("maps every crafting subcommand to its canonical route", async () => {
       nextRecommendedPollAt: readyAt,
     });
 
-    const status = await runCraftingCommand(config, "status", { job: jobId }, options);
-    assert.deepEqual(status, {
-      job: list.jobs[0],
-      nextRecommendedPollAt: readyAt,
-    });
-
     const started = await runCraftingCommand(config, "start", { recipe: recipe.id, confirm: recipe.id }, options);
     assert.deepEqual(started, { craftingJobId: jobId, readyAt, nextRecommendedPollAt: readyAt });
 
@@ -137,7 +131,6 @@ test("maps every crafting subcommand to its canonical route", async () => {
 
   assert.deepEqual(calls.map(({ method, path, body }) => ({ method, path, body })), [
     { method: "GET", path: "/api/crafting/recipes", body: undefined },
-    { method: "GET", path: "/api/crafting/jobs", body: undefined },
     { method: "GET", path: "/api/crafting/jobs", body: undefined },
     { method: "POST", path: "/api/crafting/request", body: { recipeId: recipe.id } },
     { method: "POST", path: "/api/crafting/cancel", body: { craftingJobId: jobId } },
@@ -190,25 +183,6 @@ test("preserves crafting polling hints and keeps legacy responses data-only", as
     requestWithMetadata: async () => ({ data: { jobs: [completedJob] } }),
   });
   assert.deepEqual(noHint, { jobs: [completedJob], nextRecommendedPollAt: null });
-});
-
-test("requires an exact job for crafting status without synthesizing polling metadata", async () => {
-  const config = testConfig();
-  let calls = 0;
-  const requestWithMetadata = async () => {
-    calls += 1;
-    return { data: { jobs: [] }, nextRecommendedPollAt: null };
-  };
-  await assert.rejects(
-    runCraftingCommand(config, "status", {}, { requestWithMetadata }),
-    /crafting status requires --job <craftingJobId>\./,
-  );
-  assert.equal(calls, 0);
-  await assert.rejects(
-    runCraftingCommand(config, "status", { job: "missing_job" }, { requestWithMetadata }),
-    (error) => error.code === "NOT_FOUND" && error.message === "Crafting job not found: missing_job.",
-  );
-  assert.equal(calls, 1);
 });
 
 test("rejects cleartext remote API origins before signing or fetch", async () => {
@@ -277,6 +251,30 @@ test("preserves structured retryAt errors from claim and retry-mint", async () =
       (error) => error.code && error.retryAt === retryAt && error.details.state === "submitted_unknown",
     );
   }
+});
+
+test("retains the durable mutation identity after an ambiguous HTTP 408", async () => {
+  const config = testConfig();
+  const path = await configPath();
+  const keys = [];
+  let attempts = 0;
+  const request = async (_config, _method, _path, _body, options) => {
+    keys.push(options.idempotencyKey);
+    attempts += 1;
+    if (attempts === 1) {
+      const error = new Error("Request timed out after reaching the server.");
+      error.code = "HTTP_408";
+      error.status = 408;
+      throw error;
+    }
+    return { craftingJobId: "job_timeout", readyAt: "2099-01-01T00:01:00.000Z" };
+  };
+  const flags = { recipe: "recipe_timeout", confirm: "recipe_timeout" };
+  await assert.rejects(runCraftingCommand(config, "start", flags, { request, configPath: path }), /timed out/);
+  assert.equal((await readMutationState(path)).pending.idempotencyKey, keys[0]);
+  await runCraftingCommand(config, "start", flags, { request, configPath: path });
+  assert.equal(keys[0], keys[1]);
+  assert.equal((await readMutationState(path)).pending, null);
 });
 
 test("fails closed on malformed success and reuses durable mutation identity", async () => {
@@ -352,6 +350,32 @@ test("fails closed on malformed nested recipe and job contracts", async () => {
       {
         configPath: await configPath(),
         request: async () => ({ craftingJobId: "job_1", readyAt: "not-a-time" }),
+      },
+    ),
+    (error) => error.code === "API_RESPONSE_INVALID",
+  );
+  for (const malformedClaim of [
+    { craft: { gearItemId: "gear_1", mintStatus: "complete" } },
+    { craft: { gearItemId: "gear_1", mintStatus: "complete", mintAddress: "" } },
+  ]) {
+    await assert.rejects(
+      runCraftingCommand(
+        config,
+        "claim",
+        { job: "job_1", confirm: "job_1" },
+        { configPath: await configPath(), request: async () => malformedClaim },
+      ),
+      (error) => error.code === "API_RESPONSE_INVALID",
+    );
+  }
+  await assert.rejects(
+    runCraftingCommand(
+      config,
+      "start",
+      { recipe: "recipe_year", confirm: "recipe_year" },
+      {
+        configPath: await configPath(),
+        request: async () => ({ craftingJobId: "job_year", readyAt: "2026" }),
       },
     ),
     (error) => error.code === "API_RESPONSE_INVALID",

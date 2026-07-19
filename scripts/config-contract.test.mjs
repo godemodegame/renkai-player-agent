@@ -230,9 +230,10 @@ test("keeps private and API keys out of stdout and serialized CLI errors", async
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(JSON.stringify({
     error: {
-      code: "FORBIDDEN",
+      code: `FORBIDDEN_${config.agentKey}`,
       message: `Rejected ${config.agentKey}`,
-      details: { reflectedKey: config.agentKey, reflectedPrivateKey: config.privateKeyPkcs8 },
+      retryAt: `2099-01-01T00:00:00.000Z_${config.privateKeyPkcs8}`,
+      details: { [config.agentKey]: config.privateKeyPkcs8 },
     },
   }), { status: 403, headers: { "Content-Type": "application/json" } });
   try {
