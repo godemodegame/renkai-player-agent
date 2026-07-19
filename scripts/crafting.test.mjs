@@ -249,7 +249,7 @@ test("preserves structured retryAt errors from claim and retry-mint", async () =
   const request = async (_config, _method, path) => {
     const error = new Error(path.endsWith("claim") ? "This craft is not finished yet." : "Mint is still in flight.");
     error.code = path.endsWith("claim") ? "COOLDOWN_ACTIVE" : "IDEMPOTENCY_IN_FLIGHT";
-    error.status = 409;
+    error.status = path.endsWith("claim") ? 429 : 409;
     error.retryAt = retryAt;
     error.details = { state: "submitted_unknown" };
     throw error;
@@ -286,6 +286,51 @@ test("retains the durable mutation identity after an ambiguous HTTP 408", async 
   await runCraftingCommand(config, "start", flags, { request, configPath: path });
   assert.equal(keys[0], keys[1]);
   assert.equal((await readMutationState(path)).pending, null);
+});
+
+test("retains the durable mutation identity after a malformed HTTP 409", async () => {
+  const config = testConfig();
+  const path = await configPath();
+  const keys = [];
+  let attempts = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, options = {}) => {
+    keys.push(options.headers["X-Idempotency-Key"]);
+    attempts += 1;
+    return attempts === 1
+      ? jsonResponse({ error: { code: 409, message: { malformed: true }, retryAt: 17 } }, 409)
+      : jsonResponse({ data: { craftingJobId: "job_conflict", readyAt: "2099-01-01T00:01:00.000Z" } });
+  };
+  const flags = { recipe: "recipe_conflict", confirm: "recipe_conflict" };
+  try {
+    await assert.rejects(
+      runCraftingCommand(config, "start", flags, { request: agentRequest, configPath: path }),
+      (error) => error.code === "HTTP_409" && error.status === 409,
+    );
+    assert.equal((await readMutationState(path)).pending.idempotencyKey, keys[0]);
+    await runCraftingCommand(config, "start", flags, { request: agentRequest, configPath: path });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(keys[0], keys[1]);
+  assert.equal((await readMutationState(path)).pending, null);
+});
+
+test("preserves a stable timeout error when native fields are read-only", async () => {
+  const config = testConfig();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+  };
+  try {
+    await assert.rejects(
+      agentRequest(config, "GET", "/api/crafting/recipes"),
+      (error) => error.name === "TimeoutError" && error.code === "ETIMEDOUT"
+        && error.message === "The operation was aborted due to timeout",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("fails closed on malformed success and reuses durable mutation identity", async () => {

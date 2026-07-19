@@ -84,11 +84,14 @@ function redactAgentError(error, config) {
     .filter((value) => typeof value === "string" && value.length > 0)
     .sort((left, right) => right.length - left.length);
   if (!secrets.length || !error || typeof error !== "object") return error;
-  for (const key of ["message", "code", "retryAt"]) {
-    if (typeof error[key] === "string") error[key] = redactValue(error[key], secrets);
+  const safe = new Error(redactValue(error.message ?? String(error), secrets));
+  safe.name = typeof error.name === "string" ? redactValue(error.name, secrets) : "Error";
+  for (const [key, value] of Object.entries(error)) {
+    if (key === "message") continue;
+    safe[redactValue(key, secrets)] = redactValue(value, secrets);
   }
-  if (error.details !== undefined) error.details = redactValue(error.details, secrets);
-  return error;
+  if (error.name === "TimeoutError" && typeof safe.code !== "string") safe.code = "ETIMEDOUT";
+  return safe;
 }
 
 export async function parseResponse(response, options = {}) {

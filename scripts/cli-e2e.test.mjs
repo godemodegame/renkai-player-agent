@@ -186,7 +186,7 @@ test("blocks unconfirmed crafting in the real CLI", async () => {
     const result = await runCli(["crafting", "start", "--recipe", "recipe_1", "--config", configPath]);
     assert.equal(result.code, 1);
     assert.equal(result.stdout, "");
-    assert.match(JSON.parse(result.stderr).error.message, /requires --confirm/);
+    assert.equal(JSON.parse(result.stderr).error.code, "CONFIRMATION_REQUIRED");
     assert.equal(requests, 0);
   } finally {
     await fixture.close();
