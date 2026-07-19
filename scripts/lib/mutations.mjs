@@ -79,7 +79,7 @@ export async function runDurableMutation(configPath, operation, execute, onResul
     try {
       result = await execute(pending.idempotencyKey);
     } catch (error) {
-      if (definitelyNotCommitted(error)) await writeJsonAtomic(statePath, emptyMutationState());
+      if (!state.pending && definitelyNotCommitted(error)) await writeJsonAtomic(statePath, emptyMutationState());
       throw error;
     }
     if (onResult) await onResult(result);

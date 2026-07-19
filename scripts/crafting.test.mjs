@@ -319,6 +319,38 @@ test("retains the durable mutation identity after a malformed HTTP 409", async (
   assert.equal((await readMutationState(path)).pending, null);
 });
 
+test("retains an ambiguous mutation identity across a later rate limit", async () => {
+  const config = testConfig();
+  const path = await configPath();
+  const keys = [];
+  let attempts = 0;
+  const request = async (_config, _method, _path, _body, options) => {
+    keys.push(options.idempotencyKey);
+    attempts += 1;
+    if (attempts === 1) throw new TypeError("response lost");
+    if (attempts === 2) {
+      const error = new Error("rate limited");
+      error.code = "RATE_LIMITED";
+      error.status = 429;
+      throw error;
+    }
+    return { craftingJobId: "job_rate_limit", readyAt: "2099-01-01T00:01:00.000Z" };
+  };
+  const flags = { recipe: "recipe_rate_limit", confirm: "recipe_rate_limit" };
+  await assert.rejects(
+    runCraftingCommand(config, "start", flags, { request, configPath: path }),
+    (error) => error instanceof TypeError,
+  );
+  await assert.rejects(
+    runCraftingCommand(config, "start", flags, { request, configPath: path }),
+    (error) => error.code === "RATE_LIMITED",
+  );
+  assert.equal((await readMutationState(path)).pending.idempotencyKey, keys[0]);
+  await runCraftingCommand(config, "start", flags, { request, configPath: path });
+  assert.deepEqual(keys, [keys[0], keys[0], keys[0]]);
+  assert.equal((await readMutationState(path)).pending, null);
+});
+
 test("preserves a stable timeout error when native fields are read-only", async () => {
   const config = testConfig();
   const originalFetch = globalThis.fetch;
