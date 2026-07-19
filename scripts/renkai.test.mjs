@@ -931,3 +931,48 @@ test("automation uninstall removes optional battle and obsolete quest jobs", asy
   assert.equal(config.automation.runtime, null);
   assert.equal(config.automation.jobId, null);
 });
+
+test("step claims a ready quest action and returns the authoritative result", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "renkai-step-claim-test-"));
+  const configPath = join(directory, "agent.json");
+  const config = {
+    version: 3,
+    ...createWallet(),
+    baseUrl: "https://example.test",
+    agentKey: "agent-key",
+    profile: { direction: "miner", resources: ["iron"], goal: "balanced" },
+    battle: null,
+    referral: null,
+    automation: { runtime: null, jobId: null, scriptPath: null, lastRunAt: null, lastPledgedWindowId: null, lastAlertedWindowId: null, notification: null },
+  };
+  await writeFile(configPath, JSON.stringify(config), { mode: 0o600 });
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    const path = new URL(url).pathname;
+    requests.push({ method: options.method ?? "GET", path, body: options.body ? JSON.parse(options.body) : undefined });
+    const data = path === "/api/war/state"
+      ? { nextWarAt: "2099-01-01T00:00:00.000Z", policy: null, pledge: null }
+      : path === "/api/player/state"
+        ? {
+          player: { level: 1, branch: null, class: null, gold: 0, status: "questing", currentStamina: 9, castleId: "ashkeep" },
+          activeQuestAction: { questActionId: "action_1", questName: "Iron Trail", lockedUntil: "2000-01-01T00:00:00.000Z" },
+        }
+        : { questActionId: "action_1", outcome: "success", xp: 5, gold: 1, resources: [], level: 1 };
+    return new Response(JSON.stringify({ data }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    assert.deepEqual(await takeStep(configPath, config), {
+      action: "claimed_quest",
+      quest: "Iron Trail",
+      questResult: { questActionId: "action_1", outcome: "success", xp: 5, gold: 1, resources: [], level: 1 },
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.deepEqual(requests.map(({ method, path, body }) => ({ method, path, body })), [
+    { method: "GET", path: "/api/war/state", body: undefined },
+    { method: "GET", path: "/api/player/state", body: undefined },
+    { method: "POST", path: "/api/quest/claim", body: { questActionId: "action_1" } },
+  ]);
+});
