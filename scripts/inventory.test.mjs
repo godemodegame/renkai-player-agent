@@ -215,7 +215,10 @@ test("fails closed on malformed inventory success payloads", async () => {
     { ...inventoryPayload(), observedAt: "not-a-time" },
     { ...inventoryPayload(), observedAt: "2026" },
     { ...inventoryPayload(), resources: { items: [{}], totalCount: 1 } },
+    { ...inventoryPayload(), resources: { items: [{ resourceId: "iron", category: "common", amount: 1.5 }], totalCount: 1 } },
     { ...inventoryPayload(), gear: { items: [{}], nextCursor: null } },
+    { ...inventoryPayload(), weight: { system: "castle_population", activeWeight: -1, capacityWeight: null } },
+    { ...inventoryPayload(), weight: { system: "castle_population", activeWeight: 1, capacityWeight: 10 } },
   ]) {
     await assert.rejects(
       readInventory({}, {}, { request: async () => payload }),

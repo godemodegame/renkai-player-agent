@@ -197,10 +197,7 @@ export async function main(argv = process.argv.slice(2)) {
     return print(await uninstallAutomation(configPath, config, flags.runtime));
   }
   if (command === "status") {
-    return drainNotifications(configPath, config, async () => ({
-      action: "status",
-      state: await agentRequest(config, "GET", "/api/player/state"),
-    }));
+    return drainNotifications(configPath, config, () => agentRequest(config, "GET", "/api/player/state"));
   }
   if (command === "crafting") {
     const isMutation = ["start", "cancel", "claim", "retry-mint"].includes(subcommand);

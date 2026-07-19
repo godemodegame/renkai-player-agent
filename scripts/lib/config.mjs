@@ -92,6 +92,14 @@ async function staleLock(lockPath, now) {
       const rawTimestamp = record.timestamp ?? record.createdAt;
       const recordedAt = typeof rawTimestamp === "number" ? rawTimestamp : Date.parse(rawTimestamp);
       if (typeof record.token === "string" && record.token.length > 0 && Number.isFinite(recordedAt) && recordedAt < cutoff) {
+        if (Number.isInteger(record.pid) && record.pid > 0) {
+          try {
+            process.kill(record.pid, 0);
+            return null;
+          } catch (error) {
+            if (error?.code !== "ESRCH") return null;
+          }
+        }
         return { token: record.token, mtimeMs: file.mtimeMs, malformed: false, cutoff };
       }
       if (typeof record.token === "string" && record.token.length > 0 && Number.isFinite(recordedAt)) return null;
@@ -191,7 +199,7 @@ export async function acquireNotificationLock(configPath, options = {}) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
       const handle = await open(lockPath, "wx", 0o600);
-      await handle.writeFile(`${JSON.stringify({ token, timestamp: now(), createdAt: new Date(now()).toISOString() })}\n`);
+      await handle.writeFile(`${JSON.stringify({ token, pid: process.pid, timestamp: now(), createdAt: new Date(now()).toISOString() })}\n`);
       await handle.close();
       await chmod(lockPath, 0o600);
       return { lockPath, token };

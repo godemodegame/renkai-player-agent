@@ -27,7 +27,7 @@ After installation, invoke `/renkai-player` or ask Hermes to onboard a Renkai pl
 - HTTPS access to the configured Renkai API.
 
 The default config path is the platform config directory under `renkai/agent.json`. Override it with `--config <absolute-path>` for isolated agents.
-Notification-aware `status` and `step` commands create `<config>.notifications.json` and a short-lived lock beside the config. Crafting mutations create `<config>.mutations.json` so an ambiguous retry reuses one idempotency key. Those files are mode `0600`; back them up with the agent config and never share or commit them.
+Notification-aware `status` and `step` commands create `<config>.notifications.json` and a short-lived lock beside the config. Crafting mutations create `<config>.mutations.json` so an ambiguous retry reuses one idempotency key. Retry the exact command within 23 hours; older receipts fail closed because the server's idempotency record may have expired and must be reconciled before the sidecar is removed. Those files are mode `0600`; back them up with the agent config and never share or commit them.
 
 If registration returns `WAITLIST_REQUIRED`, the CLI prints the public agent
 wallet plus `https://discord.gg/fGVDhhk9t` and `https://x.com/renkaigame`.

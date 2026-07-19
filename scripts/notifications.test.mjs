@@ -334,6 +334,20 @@ test("serializes stale takeover so a second owner cannot replace the canonical l
   assert.equal(await releaseNotificationLock(owner), true);
 });
 
+test("never reclaims an old canonical lock from a live owner", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "renkai-notification-live-owner-"));
+  const configPath = join(directory, "agent.json");
+  const lockPath = notificationLockPath(configPath);
+  const old = Date.now() - 16 * 60 * 1000;
+  await writeFile(lockPath, JSON.stringify({ token: "live-owner", pid: process.pid, timestamp: old }), { mode: 0o600 });
+  await utimes(lockPath, old / 1000, old / 1000);
+  await assert.rejects(
+    acquireNotificationLock(configPath),
+    (error) => error.code === "NOTIFICATION_DRAIN_BUSY",
+  );
+  assert.equal(JSON.parse(await readFile(lockPath, "utf8")).token, "live-owner");
+});
+
 test("sidecar writes are mode 0600 and use the config-derived path", async () => {
   const { configPath } = await fixture();
   assert.equal(notificationStatePath(configPath), `${configPath}.notifications.json`);

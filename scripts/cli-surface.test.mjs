@@ -196,8 +196,7 @@ test("status writes unreceived notifications before acknowledgement", async () =
   process.stdout.write = (chunk) => {
     events.push("stdout");
     const parsed = JSON.parse(String(chunk));
-    assert.equal(parsed.action, "status");
-    assert.equal(parsed.state.player.level, 7);
+    assert.equal(parsed.player.level, 7);
     assert.equal(parsed.notifications.count, 1);
     assert.equal(parsed.notifications.items[0].id, "notification_2");
     return true;

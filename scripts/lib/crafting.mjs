@@ -168,6 +168,7 @@ export async function listCraftingJobs(config, options = {}) {
   const response = await requestFor(normalizeOptions(options), true)(config, "GET", "/api/crafting/jobs");
   const { data, nextRecommendedPollAt } = unwrapMetadata(response);
   const result = validateJobs(data);
+  if (nextRecommendedPollAt !== null && !isTimestamp(nextRecommendedPollAt)) throw invalidResponse("jobs");
   return {
     jobs: result.jobs,
     nextRecommendedPollAt,

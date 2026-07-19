@@ -80,7 +80,9 @@ function redactValue(value, secrets) {
 }
 
 function redactAgentError(error, config) {
-  const secrets = [config.agentKey, config.privateKeyPkcs8].filter((value) => typeof value === "string" && value.length > 0);
+  const secrets = [config.agentKey, config.privateKeyPkcs8]
+    .filter((value) => typeof value === "string" && value.length > 0)
+    .sort((left, right) => right.length - left.length);
   if (!secrets.length || !error || typeof error !== "object") return error;
   for (const key of ["message", "code", "retryAt"]) {
     if (typeof error[key] === "string") error[key] = redactValue(error[key], secrets);
@@ -103,7 +105,7 @@ export async function parseResponse(response, options = {}) {
       ? responseMessage
       : response.status === 404
       ? "This Renkai deployment does not expose the requested Agent API route yet."
-      : text.slice(0, 200) || response.statusText;
+      : `Renkai API request failed with HTTP ${response.status}.`;
     const error = new Error(message);
     error.code = code;
     error.status = response.status;
@@ -134,13 +136,14 @@ export async function unsignedGet(baseUrl, path, options = {}) {
 
 export async function agentRequest(config, method, path, bodyValue, options = {}) {
   if (options.requireKey !== false && !config.agentKey) throw new Error("The wallet is not registered. Run register first.");
+  const url = endpointUrl(config.baseUrl, path);
   const body = bodyValue === undefined ? "" : JSON.stringify(bodyValue);
   const headers = signRequest(config, method, path, body);
   if (config.agentKey) headers["X-Agent-Key"] = config.agentKey;
   if (bodyValue !== undefined) headers["Content-Type"] = "application/json";
   if (options.idempotent) headers["X-Idempotency-Key"] = options.idempotencyKey ?? randomUUID();
   try {
-    return await parseResponse(await fetch(endpointUrl(config.baseUrl, path), {
+    return await parseResponse(await fetch(url, {
       method,
       headers,
       body: bodyValue === undefined ? undefined : body,

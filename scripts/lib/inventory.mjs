@@ -80,7 +80,7 @@ function isNumberRecord(value) {
 
 function isResource(item) {
   return isRecord(item) && isString(item.resourceId) && isString(item.category)
-    && Number.isFinite(item.amount) && item.amount >= 0;
+    && Number.isInteger(item.amount) && item.amount >= 0;
 }
 
 const GEAR_STATES = new Set(["mint_pending", "mint_failed_recoverable", "equipped", "attuned", "owned"]);
@@ -100,8 +100,8 @@ function validateInventory(value) {
     || !Number.isInteger(value.resources.totalCount) || value.resources.totalCount < value.resources.items.length
     || !isRecord(value.gear) || !Array.isArray(value.gear.items) || !value.gear.items.every(isGear)
     || !isNullableString(value.gear.nextCursor) || !isRecord(value.weight)
-    || value.weight.system !== "castle_population" || !Number.isFinite(value.weight.activeWeight)
-    || !(value.weight.capacityWeight === null || Number.isFinite(value.weight.capacityWeight))) {
+    || value.weight.system !== "castle_population" || !Number.isFinite(value.weight.activeWeight) || value.weight.activeWeight < 0
+    || value.weight.capacityWeight !== null) {
     throw invalidResponse();
   }
   return value;

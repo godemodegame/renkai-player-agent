@@ -110,8 +110,7 @@ test("runs notification status inventory and crafting through the real CLI", asy
     assert.deepEqual([status.code, inventory.code, recipes.code], [0, 0, 0]);
     assert.equal(status.stderr + inventory.stderr + recipes.stderr, "");
     const statusOutput = JSON.parse(status.stdout);
-    assert.equal(statusOutput.action, "status");
-    assert.equal(statusOutput.state.player.level, 7);
+    assert.equal(statusOutput.player.level, 7);
     assert.equal(statusOutput.notifications.items[0].id, "notification_web_read");
     assert.equal(JSON.parse(inventory.stdout).weight.capacityWeight, null);
     assert.equal(JSON.parse(recipes.stdout).recipes[0].id, "recipe_1");
@@ -141,7 +140,7 @@ test("drains notifications when the config filename ends with the sidecar suffix
   try {
     const result = await runCli(["status", "--config", configPath]);
     assert.equal(result.code, 0);
-    assert.equal(JSON.parse(result.stdout).action, "status");
+    assert.equal(JSON.parse(result.stdout).player.level, 7);
     assert.deepEqual(await readNotificationState(configPath), emptyNotificationState());
   } finally {
     await fixture.close();

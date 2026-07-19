@@ -221,6 +221,7 @@ test("keeps private and API keys out of stdout and serialized CLI errors", async
   const directory = await temporaryDirectory("renkai-config-secrets-");
   const configPath = join(directory, "agent.json");
   const config = configFixture();
+  config.agentKey = config.privateKeyPkcs8.slice(0, 16);
   await writeFixture(configPath, config);
 
   const profile = await captureMain(["profile", "--config", configPath]);
@@ -246,6 +247,19 @@ test("keeps private and API keys out of stdout and serialized CLI errors", async
       assert.equal(serialized.includes(config.agentKey), false);
       assert.equal(serialized.includes("privateKeyPkcs8"), false);
       assert.equal(serialized.includes("agentKey"), false);
+      return true;
+    });
+
+    globalThis.fetch = async () => new Response(
+      `${"x".repeat(195)}${config.agentKey}${config.privateKeyPkcs8}`,
+      { status: 502, headers: { "Content-Type": "text/plain" } },
+    );
+    await assert.rejects(main(["state", "--config", configPath]), (error) => {
+      const serialized = JSON.stringify(cliErrorOutput(error));
+      assert.equal(error.message, "Renkai API request failed with HTTP 502.");
+      assert.equal(serialized.includes(config.agentKey), false);
+      assert.equal(serialized.includes(config.agentKey.slice(0, 12)), false);
+      assert.equal(serialized.includes(config.privateKeyPkcs8), false);
       return true;
     });
   } finally {

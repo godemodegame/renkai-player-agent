@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -12,7 +12,7 @@ import {
 import {
   runCraftingCommand,
 } from "./lib/crafting.mjs";
-import { readMutationState } from "./lib/mutations.mjs";
+import { mutationStatePath, readMutationState } from "./lib/mutations.mjs";
 
 function testConfig() {
   return {
@@ -183,6 +183,15 @@ test("preserves crafting polling hints and keeps legacy responses data-only", as
     requestWithMetadata: async () => ({ data: { jobs: [completedJob] } }),
   });
   assert.deepEqual(noHint, { jobs: [completedJob], nextRecommendedPollAt: null });
+
+  for (const invalidHint of [{}, [], 1, "2026-07-19"]) {
+    await assert.rejects(
+      runCraftingCommand(config, "list", {}, {
+        requestWithMetadata: async () => ({ data: { jobs: [] }, nextRecommendedPollAt: invalidHint }),
+      }),
+      (error) => error.code === "API_RESPONSE_INVALID",
+    );
+  }
 });
 
 test("rejects cleartext remote API origins before signing or fetch", async () => {
@@ -271,7 +280,9 @@ test("retains the durable mutation identity after an ambiguous HTTP 408", async 
   };
   const flags = { recipe: "recipe_timeout", confirm: "recipe_timeout" };
   await assert.rejects(runCraftingCommand(config, "start", flags, { request, configPath: path }), /timed out/);
-  assert.equal((await readMutationState(path)).pending.idempotencyKey, keys[0]);
+  const pending = (await readMutationState(path)).pending;
+  assert.equal(pending.idempotencyKey, keys[0]);
+  assert.equal(Number.isFinite(Date.parse(pending.createdAt)), true);
   await runCraftingCommand(config, "start", flags, { request, configPath: path });
   assert.equal(keys[0], keys[1]);
   assert.equal((await readMutationState(path)).pending, null);
@@ -404,4 +415,37 @@ test("retains mutation identity until the validated receipt is written", async (
   await runCraftingCommand(config, "start", flags, { request, configPath: path, onResult });
   assert.equal(keys[0], keys[1]);
   assert.equal((await readMutationState(path)).pending, null);
+});
+
+test("rejects empty durable mutation identities", async () => {
+  const path = await configPath();
+  const createdAt = "2099-01-01T00:00:00.000Z";
+  for (const pending of [
+    { operation: "", idempotencyKey: "key", createdAt },
+    { operation: "operation", idempotencyKey: "", createdAt },
+    { operation: "operation", idempotencyKey: "key", createdAt: "not-a-time" },
+  ]) {
+    await writeFile(mutationStatePath(path), JSON.stringify({ version: 1, pending }), { mode: 0o600 });
+    await assert.rejects(readMutationState(path), (error) => error.code === "MUTATION_STATE_INVALID");
+  }
+});
+
+test("never replays a durable mutation after the server idempotency window", async () => {
+  const path = await configPath();
+  const recipeId = "recipe_expired";
+  const operation = JSON.stringify({ method: "POST", path: "/api/crafting/request", body: { recipeId } });
+  const pending = { operation, idempotencyKey: "expired-key", createdAt: "2000-01-01T00:00:00.000Z" };
+  await writeFile(mutationStatePath(path), JSON.stringify({ version: 1, pending }), { mode: 0o600 });
+  let requests = 0;
+  await assert.rejects(
+    runCraftingCommand(
+      testConfig(),
+      "start",
+      { recipe: recipeId, confirm: recipeId },
+      { configPath: path, request: async () => { requests += 1; } },
+    ),
+    (error) => error.code === "MUTATION_RETRY_EXPIRED",
+  );
+  assert.equal(requests, 0);
+  assert.deepEqual((await readMutationState(path)).pending, pending);
 });
