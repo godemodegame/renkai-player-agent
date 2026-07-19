@@ -104,6 +104,99 @@ test("offline setup creates a private reusable config without printing secrets",
   assert.equal((await stat(configPath)).mode & 0o777, 0o600);
 });
 
+test("battle-history performs one explicit authenticated history read", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "renkai-war-history-test-"));
+  const configPath = join(directory, "agent.json");
+  const config = {
+    version: 3,
+    ...createWallet(),
+    baseUrl: "https://example.test",
+    agentKey: "agent-key",
+    profile: { direction: "defender", resources: ["common"], goal: "balanced" },
+    battle: null,
+    referral: null,
+    automation: { runtime: null, jobId: null, scriptPath: null, lastRunAt: null, lastPledgedWindowId: null, lastAlertedWindowId: null, notification: null },
+  };
+  await writeFile(configPath, JSON.stringify(config), { mode: 0o600 });
+  const originalFetch = globalThis.fetch;
+  const originalWrite = process.stdout.write;
+  const requests = [];
+  const writes = [];
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url: String(url), options });
+    return new Response(JSON.stringify({ data: { latestResult: null } }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+  process.stdout.write = (chunk) => { writes.push(String(chunk)); return true; };
+  try {
+    await main(["battle-history", "--config", configPath]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalWrite;
+  }
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, "https://example.test/api/war/history");
+  assert.equal(requests[0].options.method, "GET");
+  assert.equal(typeof requests[0].options.headers["X-Agent-Signature"], "string");
+  assert.deepEqual(JSON.parse(writes.join("")), { latestResult: null });
+});
+
+test("step emits only a war notification reference and acknowledges its original id", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "renkai-war-step-test-"));
+  const configPath = join(directory, "agent.json");
+  const config = {
+    version: 3,
+    ...createWallet(),
+    baseUrl: "https://example.test",
+    agentKey: "agent-key",
+    profile: { direction: "defender", resources: ["common"], goal: "balanced" },
+    battle: null,
+    referral: null,
+    automation: { runtime: null, jobId: null, scriptPath: null, lastRunAt: null, lastPledgedWindowId: null, lastAlertedWindowId: null, notification: null },
+  };
+  await writeFile(configPath, JSON.stringify(config), { mode: 0o600 });
+  const notificationId = "notification_01KTESTWARREFERENCE";
+  const calls = [];
+  const writes = [];
+  const originalFetch = globalThis.fetch;
+  const originalWrite = process.stdout.write;
+  globalThis.fetch = async (url, options = {}) => {
+    const path = new URL(url).pathname + new URL(url).search;
+    calls.push({ path, method: options.method, body: options.body });
+    let data;
+    if (path === "/api/war/state") {
+      data = { nextWarAt: "2099-01-01T00:00:00.000Z", policy: null, pledge: null };
+    } else if (path === "/api/player/state") {
+      data = { player: { level: 1, branch: null, class: null, gold: 0, status: "idle", currentStamina: 0, nextStaminaAt: "2099-01-01T00:00:00.000Z" }, activeQuestAction: null };
+    } else if (path === "/api/notifications?limit=50") {
+      data = { items: [{ id: notificationId, type: "war_resolved", payload: { power: 999, outcome: "breached" }, readAt: null, createdAt: "2026-07-19T00:00:00.000Z" }], nextCursor: null };
+    } else if (path === "/api/notifications/ack") {
+      const body = JSON.parse(options.body);
+      data = { results: body.notificationIds.map((id) => ({ id, status: "acknowledged" })) };
+    } else {
+      throw new Error(`Unexpected request: ${path}`);
+    }
+    return new Response(JSON.stringify({ data }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  process.stdout.write = (chunk) => { writes.push(String(chunk)); return true; };
+  try {
+    await main(["step", "--config", configPath]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    process.stdout.write = originalWrite;
+  }
+
+  const output = JSON.parse(writes.join(""));
+  assert.deepEqual(output.notifications.items, [{ id: notificationId, type: "war_resolved" }]);
+  assert.equal(calls.some((call) => call.path === "/api/war/history"), false);
+  assert.deepEqual(JSON.parse(calls.find((call) => call.path === "/api/notifications/ack").body), {
+    notificationIds: [notificationId],
+  });
+});
+
 test("accepts only app.renkai.xyz referral links or an explicit no-referrer choice", () => {
   assert.deepEqual(parseReferralInput("https://app.renkai.xyz/start?ref=player_abc-123&utm_source=agent"), {
     referrerPlayerId: "player_abc-123",
