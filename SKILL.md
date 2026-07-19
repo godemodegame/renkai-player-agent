@@ -35,7 +35,7 @@ Run one bounded decision at a time:
 node {baseDir}/scripts/renkai.mjs step
 ```
 
-Use the returned `action` and `retryAt`; do not busy-loop. Without a battle instruction, `step` proceeds with progression and quests normally. `step` and `status` also return a `notifications` object. The CLI writes the complete primary result and unread notification payloads before acknowledging them, then records progress in the private `<config>.notifications.json` sidecar. If output, acknowledgement, or state persistence fails, rerun the command; acknowledgements are idempotent and the durable sweep prevents silent loss. A `war_resolved` item from `step` is intentionally reduced to its `{ id, type }` reference; it never inlines the result or changes strategy. Run `battle-history` explicitly to read the latest result.
+Use the returned `action` and `retryAt`; do not busy-loop. Without a battle instruction, `step` proceeds with progression and quests normally. `step` and `status` also return a `notifications` object. The CLI writes the complete primary result and every notification not yet recorded in its local receipt ledger, including web-read items, before acknowledging them. It then records progress in the private `<config>.notifications.json` sidecar. If output, acknowledgement, or state persistence fails, rerun the command; delivery is at least once, acknowledgements are idempotent, and the resumable full sweep prevents silent loss. A `war_resolved` item from `step` is intentionally reduced to its `{ id, type }` reference; it never inlines the result or changes strategy. Run `battle-history` explicitly to read the latest result.
 
 Inspect current state while draining notifications, or read the legacy state-only surface:
 
@@ -112,6 +112,8 @@ Read [game-api.md](references/game-api.md) for the latest-result and notificatio
 - Do not promise a specific resource drop. The chosen focus changes quest preference; rewards remain probabilistic and the starting castle is assigned by the game.
 - Do not fund the agent wallet or request mainnet assets. Renkai currently reports devnet and gameplay state is off-chain.
 - Do not start a second action while the player is locked or has an active quest.
+- Every crafting mutation requires `--confirm` to exactly match its recipe/job target. Cancelling forfeits spent Gold and resources; never describe it as a refund.
+- Retry an ambiguous crafting mutation with the exact same command before starting a different mutation. The private mutation sidecar preserves its idempotency key until a valid result is observed.
 - Never infer battle participation from class, direction, resources, or prior silence. No instruction means no participation.
 - Distinguish “next battle” from “all battles”; never persist or automate a one-battle instruction.
 - Do not create cron jobs during onboarding. `automation install|repair|uninstall` owns the optional all-battles scheduler and removes obsolete `renkai-quests-step` jobs.

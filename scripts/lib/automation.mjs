@@ -1,10 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { agentRequest } from "./api.mjs";
-import { emptyAutomation, writeConfig } from "./config.mjs";
+import { emptyAutomation, writeConfig, writeTextAtomic } from "./config.mjs";
 
 const AUTOMATION_NAME = "renkai-all-battles";
 const LEGACY_BATTLE_AUTOMATION_NAME = "renkai-mandatory-battles";
@@ -152,8 +152,7 @@ export async function installAutomation(rootEntryPath, configPath, config, runti
     wrapperPath = join(scriptsDir, `${AUTOMATION_NAME}.sh`);
     await mkdir(scriptsDir, { recursive: true, mode: 0o700 });
     const quote = (value) => `'${String(value).replaceAll("'", `'\\''`)}'`;
-    await writeFile(wrapperPath, `#!/usr/bin/env bash\nexec ${quote(process.execPath)} ${quote(rootEntryPath)} battle-tick --quiet --config ${quote(configPath)}\n`, { mode: 0o700 });
-    await chmod(wrapperPath, 0o700);
+    await writeTextAtomic(wrapperPath, `#!/usr/bin/env bash\nexec ${quote(process.execPath)} ${quote(rootEntryPath)} battle-tick --quiet --config ${quote(configPath)}\n`, 0o700);
     runner("/bin/bash", [wrapperPath]);
   }
 

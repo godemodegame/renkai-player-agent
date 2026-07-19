@@ -2,14 +2,12 @@ import assert from "node:assert/strict";
 import { createPublicKey, createPrivateKey, verify } from "node:crypto";
 import test from "node:test";
 import {
-  agentRequest,
   buildSignatureMessage,
   createWallet,
 } from "./lib/api.mjs";
 import {
   handleInventory,
   inventoryPath,
-  parseInventoryFlags,
   readInventory,
 } from "./lib/inventory.mjs";
 

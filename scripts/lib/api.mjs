@@ -52,6 +52,19 @@ function wantsMetadata(options = {}) {
   return options.metadata === true || options.withMetadata === true || options.includeMetadata === true;
 }
 
+function endpointUrl(baseUrl, path) {
+  const base = new URL(baseUrl);
+  const url = new URL(path, base);
+  const loopback = ["127.0.0.1", "[::1]", "localhost"].includes(url.hostname);
+  if (url.origin !== base.origin || (url.protocol !== "https:" && !(url.protocol === "http:" && loopback))
+    || url.username || url.password) {
+    const error = new Error("Renkai API requests require an HTTPS origin (HTTP is allowed only on loopback).");
+    error.code = "INSECURE_API_ORIGIN";
+    throw error;
+  }
+  return url;
+}
+
 export async function parseResponse(response, options = {}) {
   const text = await response.text();
   let payload;
@@ -83,7 +96,10 @@ export async function parseResponseWithMetadata(response) {
 }
 
 export async function unsignedGet(baseUrl, path, options = {}) {
-  return parseResponse(await fetch(new URL(path, baseUrl), { signal: AbortSignal.timeout(10_000) }), options);
+  return parseResponse(await fetch(endpointUrl(baseUrl, path), {
+    redirect: "error",
+    signal: AbortSignal.timeout(10_000),
+  }), options);
 }
 
 export async function agentRequest(config, method, path, bodyValue, options = {}) {
@@ -93,10 +109,11 @@ export async function agentRequest(config, method, path, bodyValue, options = {}
   if (config.agentKey) headers["X-Agent-Key"] = config.agentKey;
   if (bodyValue !== undefined) headers["Content-Type"] = "application/json";
   if (options.idempotent) headers["X-Idempotency-Key"] = options.idempotencyKey ?? randomUUID();
-  return parseResponse(await fetch(new URL(path, config.baseUrl), {
+  return parseResponse(await fetch(endpointUrl(config.baseUrl, path), {
     method,
     headers,
     body: bodyValue === undefined ? undefined : body,
+    redirect: "error",
     signal: AbortSignal.timeout(15_000),
   }), options);
 }

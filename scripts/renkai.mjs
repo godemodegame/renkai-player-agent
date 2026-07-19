@@ -146,6 +146,7 @@ function help() {
       "renkai.mjs automation install --runtime hermes --notify-channel origin",
     ],
     referral: "Pass --referral <https://app.renkai.xyz/...?...ref=player_...>; use --referral none only when there is no referrer.",
+    crafting: "Every mutation requires an exact target-matching --confirm. Cancelled jobs do not refund spent Gold or resources; wait for readyAt/nextRecommendedPollAt instead of busy-looping.",
   };
 }
 
@@ -159,9 +160,6 @@ export async function main(argv = process.argv.slice(2)) {
   if (command === "register") return print(await register(configPath, config));
   if (command === "profile") return print(safeProfile(config));
   if (command === "state") return print(await agentRequest(config, "GET", "/api/player/state"));
-  if (command === "status") {
-    return drainNotifications(configPath, config, () => agentRequest(config, "GET", "/api/player/state"));
-  }
   if (command === "quests") return print(await agentRequest(config, "GET", "/api/quests"));
   if (command === "battle-history") return print(await agentRequest(config, "GET", "/api/war/history"));
   if (command === "step") {
@@ -170,7 +168,6 @@ export async function main(argv = process.argv.slice(2)) {
     });
   }
   if (command === "inventory") return print(await readInventory(config, flags));
-  if (command === "crafting") return print(await runCraftingCommand(config, subcommand, flags));
   if (command === "battle-next" && subcommand === "show") return print(await agentRequest(config, "GET", "/api/war/state"));
   if (command === "battle-next" && subcommand === "set") return print(await setNextBattle(config, flags.mode, flags.target));
   if (command === "battle-next" && subcommand === "clear") return print(await clearNextBattle(config));
@@ -190,6 +187,14 @@ export async function main(argv = process.argv.slice(2)) {
   if (command === "automation" && subcommand === "uninstall") {
     return print(await uninstallAutomation(configPath, config, flags.runtime));
   }
+  if (command === "status") {
+    return drainNotifications(configPath, config, async () => ({
+      action: "status",
+      state: await agentRequest(config, "GET", "/api/player/state"),
+    }));
+  }
+  if (command === "inventory") return print(await readInventory(config, flags));
+  if (command === "crafting") return print(await runCraftingCommand(config, subcommand, flags, { configPath }));
   throw new Error("Unknown command: " + command + (subcommand ? " " + subcommand : ""));
 }
 

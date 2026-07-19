@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import {
   agentRequest,
@@ -9,6 +12,7 @@ import {
 import {
   runCraftingCommand,
 } from "./lib/crafting.mjs";
+import { readMutationState } from "./lib/mutations.mjs";
 
 function testConfig() {
   return {
@@ -16,6 +20,10 @@ function testConfig() {
     baseUrl: "https://crafting.example.test",
     agentKey: "agent-key",
   };
+}
+
+async function configPath() {
+  return join(await mkdtemp(join(tmpdir(), "renkai-crafting-")), "agent.json");
 }
 
 function jsonResponse(payload, status = 200) {
@@ -37,6 +45,7 @@ async function withFetch(handler, action) {
 
 test("maps every crafting subcommand to its canonical route", async () => {
   const config = testConfig();
+  const options = { configPath: await configPath() };
   const calls = [];
   const recipe = {
     id: "recipe_iron_sword",
@@ -80,25 +89,25 @@ test("maps every crafting subcommand to its canonical route", async () => {
   };
 
   await withFetch(handler, async () => {
-    const recipes = await runCraftingCommand(config, "recipes", {});
+    const recipes = await runCraftingCommand(config, "recipes", {}, options);
     assert.deepEqual(recipes, { recipes: [recipe] });
 
-    const list = await runCraftingCommand(config, "list", {});
+    const list = await runCraftingCommand(config, "list", {}, options);
     assert.deepEqual(list, {
       jobs: [{ craftingJobId: jobId, recipeId: recipe.id, status: "in_progress", readyAt }],
       nextRecommendedPollAt: readyAt,
     });
 
-    const started = await runCraftingCommand(config, "start", { recipe: recipe.id, confirm: recipe.id });
+    const started = await runCraftingCommand(config, "start", { recipe: recipe.id, confirm: recipe.id }, options);
     assert.deepEqual(started, { craftingJobId: jobId, readyAt, nextRecommendedPollAt: readyAt });
 
-    const cancelled = await runCraftingCommand(config, "cancel", { job: jobId, confirm: jobId });
+    const cancelled = await runCraftingCommand(config, "cancel", { job: jobId, confirm: jobId }, options);
     assert.deepEqual(cancelled, { craftingJobId: jobId, status: "cancelled" });
 
-    const failedClaim = await runCraftingCommand(config, "claim", { job: jobId, confirm: jobId });
+    const failedClaim = await runCraftingCommand(config, "claim", { job: jobId, confirm: jobId }, options);
     assert.deepEqual(failedClaim, { craft: { gearItemId: "gear_123", mintStatus: "failed_recoverable", mintError: "RPC unavailable" } });
 
-    const retried = await runCraftingCommand(config, "retry-mint", { job: jobId, confirm: jobId });
+    const retried = await runCraftingCommand(config, "retry-mint", { job: jobId, confirm: jobId }, options);
     assert.deepEqual(retried, { craft: { gearItemId: "gear_123", mintStatus: "complete", mintAddress: "mint_123" } });
   });
 
@@ -148,6 +157,22 @@ test("preserves crafting polling hints and keeps legacy responses data-only", as
   assert.deepEqual(noHint, { jobs: [{ craftingJobId: "done", status: "complete" }], nextRecommendedPollAt: null });
 });
 
+test("rejects cleartext remote API origins before signing or fetch", async () => {
+  const config = { ...testConfig(), baseUrl: "http://api.example.test" };
+  let fetchCalls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    throw new Error("fetch should not run");
+  };
+  try {
+    await assert.rejects(agentRequest(config, "GET", "/api/crafting/recipes"), (error) => error.code === "INSECURE_API_ORIGIN");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(fetchCalls, 0);
+});
+
 test("requires target-matching confirmation before every crafting mutation", async () => {
   const config = testConfig();
   let calls = 0;
@@ -182,18 +207,54 @@ test("requires target-matching confirmation before every crafting mutation", asy
 
 test("preserves structured retryAt errors from claim and retry-mint", async () => {
   const config = testConfig();
+  const path = await configPath();
   const retryAt = "2099-01-01T00:10:00.000Z";
   const request = async (_config, _method, path) => {
     const error = new Error(path.endsWith("claim") ? "This craft is not finished yet." : "Mint is still in flight.");
     error.code = path.endsWith("claim") ? "COOLDOWN_ACTIVE" : "IDEMPOTENCY_IN_FLIGHT";
+    error.status = 409;
     error.retryAt = retryAt;
     error.details = { state: "submitted_unknown" };
     throw error;
   };
   for (const subcommand of ["claim", "retry-mint"]) {
     await assert.rejects(
-      runCraftingCommand(config, subcommand, { job: "job_1", confirm: "job_1" }, { request }),
+      runCraftingCommand(config, subcommand, { job: "job_1", confirm: "job_1" }, { request, configPath: path }),
       (error) => error.code && error.retryAt === retryAt && error.details.state === "submitted_unknown",
     );
   }
+});
+
+test("fails closed on malformed success and reuses durable mutation identity", async () => {
+  const config = testConfig();
+  const path = await configPath();
+  const keys = [];
+  let attempts = 0;
+  const request = async (_config, _method, _path, _body, options) => {
+    keys.push(options.idempotencyKey);
+    attempts += 1;
+    if (attempts === 1) throw new TypeError("response lost");
+    return { craftingJobId: "job_safe", readyAt: "2099-01-01T00:01:00.000Z" };
+  };
+  const flags = { recipe: "recipe_safe", confirm: "recipe_safe" };
+  await assert.rejects(runCraftingCommand(config, "start", flags, { request, configPath: path }), /response lost/);
+  const recovered = await runCraftingCommand(config, "start", flags, { request, configPath: path });
+  assert.equal(recovered.craftingJobId, "job_safe");
+  assert.equal(keys[0], keys[1]);
+  assert.equal((await readMutationState(path)).pending, null);
+
+  const malformedKeys = [];
+  let malformedAttempts = 0;
+  const malformedRequest = async (_config, _method, _path, _body, options) => {
+    malformedKeys.push(options.idempotencyKey);
+    malformedAttempts += 1;
+    return malformedAttempts === 1 ? null : { craftingJobId: "job_valid", readyAt: "2099-01-01T00:02:00.000Z" };
+  };
+  const nextFlags = { recipe: "recipe_next", confirm: "recipe_next" };
+  await assert.rejects(
+    runCraftingCommand(config, "start", nextFlags, { request: malformedRequest, configPath: path }),
+    (error) => error.code === "API_RESPONSE_INVALID",
+  );
+  await runCraftingCommand(config, "start", nextFlags, { request: malformedRequest, configPath: path });
+  assert.equal(malformedKeys[0], malformedKeys[1]);
 });

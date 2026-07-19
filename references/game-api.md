@@ -39,4 +39,17 @@ Negative `goldDelta` means breached total loss, positive means defended total ea
 
 `status` and `step` page authenticated `GET /api/notifications?limit=50`, up to 10 pages/500 rows per run. The CLI writes the primary result plus notifications before calling idempotent `POST /api/notifications/ack` in batches of at most 50. It serializes drains with a private lock and persists its watermark/sweep beside the config. When `more` is true, rerun later to continue the bounded sweep. A retry result includes `retryAt`; do not busy-loop. Delivery is at least once; rerun after a failure.
 
+```json
+{
+  "notifications": {
+    "status": "ready",
+    "items": [],
+    "count": 0,
+    "more": false
+  }
+}
+```
+
+The CLI writes the primary result plus every locally unreceived notification before calling idempotent `POST /api/notifications/ack` in batches of at most 50. Web-read items are still delivered because server read state is not a CLI receipt. It serializes drains with a private lock and persists its receipt ledger/full-sweep cursor beside the config. When `more` is true, rerun later to continue the bounded sweep. A retry result includes `retryAt`; do not busy-loop.
+
 `step` projects `war_resolved` to `{ "id": "...", "type": "war_resolved" }` only. It never calls `/api/war/history`, inlines the result, or changes strategy. Run `battle-history` explicitly when the result is needed.

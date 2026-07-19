@@ -77,6 +77,7 @@ test("prints stable help before config access", async () => {
   assert.match(help.examples.join("\n"), /inventory --limit 100/);
   assert.match(help.examples.join("\n"), /crafting start/);
   assert.match(help.referral, /--referral/);
+  assert.match(help.crafting, /do not refund/);
 });
 
 test("routes legacy read commands", async () => {
@@ -148,7 +149,7 @@ test("routes inventory and crafting through the executable surface", async () =>
   ]);
 });
 
-test("status writes unread notifications before acknowledgement", async () => {
+test("status writes unreceived notifications before acknowledgement", async () => {
   const directory = await mkdtemp(join(tmpdir(), "renkai-cli-notifications-"));
   const configPath = join(directory, "agent.json");
   await writeFile(configPath, JSON.stringify(testConfig()), { mode: 0o600 });
@@ -168,7 +169,8 @@ test("status writes unread notifications before acknowledgement", async () => {
   process.stdout.write = (chunk) => {
     events.push("stdout");
     const parsed = JSON.parse(String(chunk));
-    assert.equal(parsed.player.level, 7);
+    assert.equal(parsed.action, "status");
+    assert.equal(parsed.state.player.level, 7);
     assert.equal(parsed.notifications.count, 1);
     assert.equal(parsed.notifications.items[0].id, "notification_2");
     return true;

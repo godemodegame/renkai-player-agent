@@ -18,6 +18,8 @@
 | `blacksmith` | `laborer` | `blacksmith` | Can craft and repair gear |
 | `miner` | `laborer` | `miner` | +1 of each resource yielded by gathering quests |
 
+From levels 5 through 14, a laborer with no final class may craft laborer recipes at the forge. Reaching level 15 ends this apprenticeship even before a final class is chosen. A blacksmith may craft either branch and repair gear; a miner may do neither.
+
 ## Quest preference
 
 Every active quest costs 1 stamina. Failures yield no resources.
@@ -58,6 +60,8 @@ All common resources can eventually drop in every castle. Castle-biased and rare
 
 - Poll at the server-provided time or after the active lock expires; never busy-loop.
 - Reuse the same idempotency key only when replaying the exact same mutation.
-- `status` emits locally unreceived notification payloads before acknowledgement. `step` does the same except that `war_resolved` is reduced to its id/type reference. On an error, rerun rather than discarding or deduplicating payloads yourself.
+- Use `inventory [--limit 1-100] [--cursor <opaque>]` for mutation-free bag reads. Use `crafting recipes|list` for read-only state and `crafting start|cancel|claim|retry-mint` for lifecycle mutations.
+- Supply an exact target-matching `--confirm` for every crafting mutation. Cancelling forfeits the already-spent Gold and resources. Resume after restart with `crafting list` and wait until `readyAt` or `nextRecommendedPollAt`.
+- `status` emits locally unreceived notification payloads before acknowledgement, even if the web UI already read them. `step` does the same except that `war_resolved` is reduced to its id/type reference. Delivery is at least once: on an error, rerun rather than discarding or deduplicating payloads yourself.
 - Treat `FEATURE_DISABLED` as an operator gate and `FORBIDDEN` during registration as a whitelist gate.
 - Treat branch/class selections as permanent.
