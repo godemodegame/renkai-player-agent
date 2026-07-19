@@ -207,6 +207,16 @@ export async function takeStep(configPath, config) {
     return { action: "wait", reason: "next_battle_reserved", pledge: warState.pledge, retryAt: warState.nextWarAt };
   }
   if (state.activeQuestAction) {
+    if (Date.parse(state.activeQuestAction.lockedUntil) <= nowMs) {
+      const questResult = await agentRequest(
+        config,
+        "POST",
+        "/api/quest/claim",
+        { questActionId: state.activeQuestAction.questActionId },
+        { idempotent: true },
+      );
+      return { action: "claimed_quest", quest: state.activeQuestAction.questName, questResult };
+    }
     return { action: "wait", reason: "quest_in_progress", quest: state.activeQuestAction.questName, retryAt: state.activeQuestAction.lockedUntil };
   }
   if (player.status !== "idle" && player.status !== "rest") {

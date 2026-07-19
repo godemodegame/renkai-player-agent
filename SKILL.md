@@ -37,6 +37,8 @@ node {baseDir}/scripts/renkai.mjs step
 
 Use the returned `action` and `retryAt`; do not busy-loop. Without a battle instruction, `step` proceeds with progression and quests normally. `step` and `status` also return a `notifications` object. The CLI writes the complete primary result and every notification not yet recorded in its local receipt ledger, including web-read items, before acknowledging them. It then records progress in the private `<config>.notifications.json` sidecar. If output, acknowledgement, or state persistence fails, rerun the command; delivery is at least once, acknowledgements are idempotent, and the resumable full sweep prevents silent loss. A `war_resolved` item from `step` is intentionally reduced to its `{ id, type }` reference; it never inlines the result or changes strategy. Run `battle-history` explicitly to read the latest result.
 
+When `step` sees an active quest whose server `lockedUntil` has passed, it claims that action exactly once through the explicit quest-claim endpoint and returns the authoritative `questResult`. Before then it returns `action: "wait"` with the server timestamp; do not derive a client timer from the quest duration or start another action.
+
 Inspect current state while draining notifications, or read the legacy state-only surface:
 
 ```bash

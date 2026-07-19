@@ -27,6 +27,17 @@ The read is owner-scoped and mutation-free. Treat the cursor as opaque and pass 
 
 Every mutation is idempotent. `--confirm` must exactly match the target ID. Every T1 recipe is available to base laborers, blacksmiths, and miners when its independent level, Gold, and resource requirements are met; recipes above T1 require the blacksmith class. Fighters do not gain crafting access. Crafting stations are not part of the game contract, so never prompt for or send station data. Use the server's `readyAt`, `nextRecommendedPollAt`, `retryAt`, and status fields instead of fixed polling intervals.
 
+## Quests
+
+`step` starts a quest with `POST /api/quest/start` and retains the returned
+`questAction.questActionId` and authoritative `lockedUntil`. Once that timestamp
+has passed, the next `step` claims the same action with an idempotent
+`POST /api/quest/claim` body `{ "questActionId": "..." }` and returns its
+`questResult` (`outcome`, `xp`, `gold`, `resources`, and `level`). A claim before
+`lockedUntil` returns `COOLDOWN_ACTIVE` with `retryAt`; wait for that server hint
+instead of retrying rapidly or starting another quest. After a restart, recover
+the action ID from `GET /api/player/state`'s `activeQuestAction`.
+
 ## Latest war result
 
 `battle-history` calls authenticated `GET /api/war/history` with no query parameters. Before the first resolved battle it returns `{ "latestResult": null }`.
