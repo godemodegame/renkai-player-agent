@@ -230,15 +230,18 @@ test("keeps private and API keys out of stdout and serialized CLI errors", async
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(JSON.stringify({
     error: {
-      code: `FORBIDDEN_${config.agentKey}`,
+      code: { [config.agentKey]: config.privateKeyPkcs8 },
       message: `Rejected ${config.agentKey}`,
-      retryAt: `2099-01-01T00:00:00.000Z_${config.privateKeyPkcs8}`,
+      retryAt: [config.privateKeyPkcs8],
       details: { [config.agentKey]: config.privateKeyPkcs8 },
     },
   }), { status: 403, headers: { "Content-Type": "application/json" } });
   try {
     await assert.rejects(main(["state", "--config", configPath]), (error) => {
-      const serialized = JSON.stringify(cliErrorOutput(error));
+      const output = cliErrorOutput(error);
+      const serialized = JSON.stringify(output);
+      assert.equal(output.error.code, "HTTP_403");
+      assert.equal(output.error.retryAt, undefined);
       assert.equal(serialized.includes(config.privateKeyPkcs8), false);
       assert.equal(serialized.includes(config.agentKey), false);
       assert.equal(serialized.includes("privateKeyPkcs8"), false);

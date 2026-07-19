@@ -94,14 +94,20 @@ export async function parseResponse(response, options = {}) {
   let payload;
   try { payload = text ? JSON.parse(text) : null; } catch { payload = null; }
   if (!response.ok) {
-    const code = payload?.error?.code ?? (response.status === 404 ? "API_NOT_DEPLOYED" : `HTTP_${response.status}`);
-    const message = payload?.error?.message ?? (response.status === 404
+    const responseCode = payload?.error?.code;
+    const code = typeof responseCode === "string" && responseCode.length > 0
+      ? responseCode
+      : response.status === 404 ? "API_NOT_DEPLOYED" : `HTTP_${response.status}`;
+    const responseMessage = payload?.error?.message;
+    const message = typeof responseMessage === "string" && responseMessage.length > 0
+      ? responseMessage
+      : response.status === 404
       ? "This Renkai deployment does not expose the requested Agent API route yet."
-      : text.slice(0, 200) || response.statusText);
+      : text.slice(0, 200) || response.statusText;
     const error = new Error(message);
     error.code = code;
     error.status = response.status;
-    error.retryAt = payload?.error?.retryAt;
+    error.retryAt = typeof payload?.error?.retryAt === "string" ? payload.error.retryAt : undefined;
     error.details = payload?.error?.details;
     throw error;
   }
