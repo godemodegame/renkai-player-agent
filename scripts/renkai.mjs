@@ -1,123 +1,61 @@
 #!/usr/bin/env node
 
-import { execFileSync } from "node:child_process";
-import { createHash, createPrivateKey, generateKeyPairSync, randomUUID, sign } from "node:crypto";
-import { existsSync } from "node:fs";
-import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  agentRequest,
+  base58Encode,
+  buildSignatureMessage,
+  createWallet,
+  signRequest,
+  unsignedGet,
+} from "./lib/api.mjs";
+import {
+  automationStatus,
+  installAutomation as installAutomationForEntry,
+  namedJobIds,
+  repairAutomation as repairAutomationForEntry,
+  resolveHermesScriptsDir,
+  runRuntimeCommand,
+  uninstallAutomation,
+} from "./lib/automation.mjs";
+import {
+  battleTick,
+  clearBattlePolicy,
+  clearNextBattle,
+  setBattlePolicy,
+  setNextBattle,
+  takeStep,
+} from "./lib/battle.mjs";
+import { configPathFrom, readConfig, safeProfile } from "./lib/config.mjs";
+import {
+  DEFAULT_BASE_URL,
+  parseReferralInput,
+  register,
+  registrationRequestBody,
+  setup,
+} from "./lib/onboarding.mjs";
+import { battleWindowContext, chooseQuestArchetype, cycleTarget } from "./lib/strategy.mjs";
 
-const DEFAULT_BASE_URL = "https://api.renkai.xyz";
-const WAITLIST_ACCESS = {
-  x: "https://x.com/renkaigame",
-  discord: "https://discord.gg/fGVDhhk9t",
+const ROOT_ENTRY_PATH = fileURLToPath(import.meta.url);
+
+export {
+  automationStatus,
+  base58Encode,
+  battleTick,
+  battleWindowContext,
+  buildSignatureMessage,
+  chooseQuestArchetype,
+  createWallet,
+  cycleTarget,
+  namedJobIds,
+  parseReferralInput,
+  registrationRequestBody,
+  resolveHermesScriptsDir,
+  runRuntimeCommand,
+  signRequest,
+  uninstallAutomation,
 };
-const AUTOMATION_NAME = "renkai-all-battles";
-const LEGACY_BATTLE_AUTOMATION_NAME = "renkai-mandatory-battles";
-const LEGACY_QUEST_AUTOMATION_NAME = "renkai-quests-step";
-const WAR_SLOT_MS = 8 * 60 * 60 * 1000;
-const WAR_RESERVE_MS = 20 * 60 * 1000;
-const WAR_LOCK_MS = 5 * 60 * 1000;
-const CASTLE_IDS = ["ashkeep", "thornmere", "gravehold", "nightglass_spire", "frostwound_bastion"];
-const DIRECTIONS = new Set(["attacker", "defender", "blacksmith", "miner"]);
-const BATTLE_MODES = new Set(["defend", "attack_fixed", "attack_cycle"]);
-const BRANCH_BY_DIRECTION = { attacker: "fighter", defender: "fighter", blacksmith: "laborer", miner: "laborer" };
-const COMMON_RESOURCES = new Set(["iron", "wood", "herbs", "stone", "bone", "fur", "coal"]);
-const CASTLE_RESOURCES = new Set(["ash_coal", "venom_sac", "grave_salt", "rune_dust", "frost_ore", "void_glass"]);
-const RARE_RESOURCES = new Set(["relic_fragment", "shadow_thread", "old_blood", "royal_seal", "ancient_oath"]);
-const RESOURCE_CASTLE = {
-  ash_coal: "ashkeep",
-  venom_sac: "thornmere",
-  grave_salt: "gravehold",
-  rune_dust: "nightglass_spire",
-  void_glass: "nightglass_spire",
-  frost_ore: "frostwound_bastion",
-  relic_fragment: "gravehold",
-  shadow_thread: "nightglass_spire",
-};
-const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-
-export function base58Encode(bytes) {
-  if (!(bytes instanceof Uint8Array)) bytes = new Uint8Array(bytes);
-  if (bytes.length === 0) return "";
-  let leadingZeroes = 0;
-  while (leadingZeroes < bytes.length && bytes[leadingZeroes] === 0) leadingZeroes += 1;
-  let value = 0n;
-  for (const byte of bytes) value = value * 256n + BigInt(byte);
-  let encoded = "";
-  while (value > 0n) {
-    encoded = BASE58_ALPHABET[Number(value % 58n)] + encoded;
-    value /= 58n;
-  }
-  return "1".repeat(leadingZeroes) + encoded;
-}
-
-export function createWallet() {
-  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
-  const publicDer = publicKey.export({ format: "der", type: "spki" });
-  return {
-    walletAddress: base58Encode(publicDer.subarray(publicDer.length - 32)),
-    privateKeyPkcs8: privateKey.export({ format: "der", type: "pkcs8" }).toString("base64"),
-  };
-}
-
-export function buildSignatureMessage(method, path, body, timestamp, nonce) {
-  const bodyHash = createHash("sha256").update(body).digest("hex");
-  return `${method.toUpperCase()}\n${path}\n${bodyHash}\n${timestamp}\n${nonce}`;
-}
-
-export function signRequest(config, method, path, body = "") {
-  const timestamp = String(Date.now());
-  const nonce = randomUUID();
-  const privateKey = createPrivateKey({
-    key: Buffer.from(config.privateKeyPkcs8, "base64"),
-    format: "der",
-    type: "pkcs8",
-  });
-  const signature = base58Encode(sign(null, Buffer.from(buildSignatureMessage(method, path, body, timestamp, nonce)), privateKey));
-  return {
-    "X-Agent-Wallet": config.walletAddress,
-    "X-Agent-Timestamp": timestamp,
-    "X-Agent-Nonce": nonce,
-    "X-Agent-Signature": signature,
-  };
-}
-
-export function chooseQuestArchetype(profile) {
-  const focus = profile.resources ?? [];
-  if (focus.some((value) => value === "rare" || RARE_RESOURCES.has(value))) return "scouting";
-  if (focus.some((value) => value === "castle" || CASTLE_RESOURCES.has(value))) return "forbidden_expedition";
-  if (focus.some((value) => value === "common" || COMMON_RESOURCES.has(value))) return "gathering";
-  if (profile.goal === "xp" || profile.goal === "gold") return "forbidden_expedition";
-  if (profile.goal === "resources") return "gathering";
-  return "scouting";
-}
-
-export function battleWindowContext(nowMs = Date.now()) {
-  const scheduledAtMs = Math.floor(nowMs / WAR_SLOT_MS + 1) * WAR_SLOT_MS;
-  return {
-    windowId: `war_${new Date(scheduledAtMs).toISOString().slice(0, 13).replace(/[-T:]/g, "_")}00`,
-    scheduledAt: new Date(scheduledAtMs).toISOString(),
-    reserveAt: new Date(scheduledAtMs - WAR_RESERVE_MS).toISOString(),
-    pledgeLockedAt: new Date(scheduledAtMs - WAR_LOCK_MS).toISOString(),
-    inReserve: nowMs >= scheduledAtMs - WAR_RESERVE_MS && nowMs < scheduledAtMs,
-    locked: nowMs >= scheduledAtMs - WAR_LOCK_MS,
-  };
-}
-
-export function cycleTarget(ownCastleId, scheduledAt) {
-  const candidates = CASTLE_IDS.filter((castleId) => castleId !== ownCastleId);
-  if (!candidates.length) throw new Error("No foreign castle is available for attack_cycle.");
-  const slot = Math.floor(Date.parse(scheduledAt) / WAR_SLOT_MS);
-  return candidates[((slot % candidates.length) + candidates.length) % candidates.length];
-}
-
-function defaultConfigPath() {
-  if (process.platform === "win32" && process.env.APPDATA) return join(process.env.APPDATA, "Renkai", "agent.json");
-  if (process.env.XDG_CONFIG_HOME) return join(process.env.XDG_CONFIG_HOME, "renkai", "agent.json");
-  return join(homedir(), ".config", "renkai", "agent.json");
-}
 
 function parseArgs(argv) {
   const [command = "help", ...rest] = argv;
@@ -126,7 +64,7 @@ function parseArgs(argv) {
   for (let index = 0; index < rest.length; index += 1) {
     const token = rest[index];
     if (!token.startsWith("--")) {
-      if (subcommand) throw new Error(`Unexpected argument: ${token}`);
+      if (subcommand) throw new Error("Unexpected argument: " + token);
       subcommand = token;
       continue;
     }
@@ -136,659 +74,19 @@ function parseArgs(argv) {
       continue;
     }
     const value = rest[index + 1];
-    if (!value || value.startsWith("--")) throw new Error(`Missing value for --${key}`);
+    if (!value || value.startsWith("--")) throw new Error("Missing value for --" + key);
     flags[key] = value;
     index += 1;
   }
   return { command, subcommand, flags };
 }
 
-function configPathFrom(flags) {
-  const candidate = flags.config ?? process.env.RENKAI_CONFIG ?? defaultConfigPath();
-  return isAbsolute(candidate) ? candidate : resolve(candidate);
-}
-
-function emptyAutomation() {
-  return {
-    runtime: null,
-    jobId: null,
-    scriptPath: null,
-    lastRunAt: null,
-    lastPledgedWindowId: null,
-    lastAlertedWindowId: null,
-    notification: null,
-  };
-}
-
-function migrateConfig(config) {
-  if (!config.walletAddress || !config.privateKeyPkcs8) throw new Error("Renkai config is missing wallet credentials.");
-  if (config.version !== 3) {
-    config.version = 3;
-    config.battle ??= null;
-    config.automation ??= emptyAutomation();
-  }
-  config.automation = { ...emptyAutomation(), ...(config.automation ?? {}) };
-  config.referral ??= null;
-  return config;
-}
-
-async function readConfig(configPath) {
-  try {
-    const parsed = JSON.parse(await readFile(configPath, "utf8"));
-    const needsMigration = parsed.version !== 3;
-    const config = migrateConfig(parsed);
-    if (needsMigration) await writeConfig(configPath, config);
-    return config;
-  } catch (error) {
-    if (error?.code === "ENOENT") throw new Error(`No Renkai agent config at ${configPath}. Run setup first.`);
-    throw error;
-  }
-}
-
-async function writeConfig(configPath, config) {
-  await mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
-  const temporary = `${configPath}.${process.pid}.${randomUUID()}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-  await rename(temporary, configPath);
-  await chmod(configPath, 0o600);
-}
-
-function safeProfile(config) {
-  return {
-    walletAddress: config.walletAddress,
-    baseUrl: config.baseUrl,
-    registered: Boolean(config.agentKey),
-    direction: config.profile.direction,
-    branch: BRANCH_BY_DIRECTION[config.profile.direction],
-    class: config.profile.direction,
-    resources: config.profile.resources,
-    goal: config.profile.goal,
-    battle: config.battle,
-    referredBy: config.referral?.referrerPlayerId ?? null,
-    setupStatus: config.agentKey ? "ready" : "wallet_only",
-  };
-}
-
-async function parseResponse(response) {
-  const text = await response.text();
-  let payload;
-  try { payload = text ? JSON.parse(text) : null; } catch { payload = null; }
-  if (!response.ok) {
-    const code = payload?.error?.code ?? (response.status === 404 ? "API_NOT_DEPLOYED" : `HTTP_${response.status}`);
-    const message = payload?.error?.message ?? (response.status === 404
-      ? "This Renkai deployment does not expose the requested Agent API route yet."
-      : text.slice(0, 200) || response.statusText);
-    const error = new Error(message);
-    error.code = code;
-    error.status = response.status;
-    error.retryAt = payload?.error?.retryAt;
-    error.details = payload?.error?.details;
-    throw error;
-  }
-  return payload?.data ?? payload;
-}
-
-async function unsignedGet(baseUrl, path) {
-  return parseResponse(await fetch(new URL(path, baseUrl), { signal: AbortSignal.timeout(10_000) }));
-}
-
-async function agentRequest(config, method, path, bodyValue, options = {}) {
-  if (options.requireKey !== false && !config.agentKey) throw new Error("The wallet is not registered. Run register first.");
-  const body = bodyValue === undefined ? "" : JSON.stringify(bodyValue);
-  const headers = signRequest(config, method, path, body);
-  if (config.agentKey) headers["X-Agent-Key"] = config.agentKey;
-  if (bodyValue !== undefined) headers["Content-Type"] = "application/json";
-  if (options.idempotent) headers["X-Idempotency-Key"] = options.idempotencyKey ?? randomUUID();
-  return parseResponse(await fetch(new URL(path, config.baseUrl), {
-    method,
-    headers,
-    body: bodyValue === undefined ? undefined : body,
-    signal: AbortSignal.timeout(15_000),
-  }));
-}
-
-function normalizeBattleMode(mode) {
-  return mode?.replaceAll("-", "_");
-}
-
-function battleBody(mode, targetCastleId) {
-  const normalized = normalizeBattleMode(mode);
-  if (!BATTLE_MODES.has(normalized)) throw new Error("--mode must be defend, attack-fixed, or attack-cycle.");
-  if (normalized === "attack_fixed" && !targetCastleId) throw new Error("attack-fixed requires --battle-target/--target <castle>.");
-  if (normalized !== "attack_fixed" && targetCastleId) throw new Error("A battle target is valid only for attack-fixed.");
-  return { mode: normalized, ...(targetCastleId ? { targetCastleId } : {}) };
-}
-
-export function parseReferralInput(input) {
-  if (!input) throw new Error("--referral is required; paste an app.renkai.xyz referral link or use --referral none.");
-  if (["none", "no", "нет"].includes(input.trim().toLowerCase())) return null;
-  let url;
-  try {
-    url = new URL(input.trim());
-  } catch {
-    throw new Error("Referral must be an https://app.renkai.xyz link or none.");
-  }
-  if (url.origin !== "https://app.renkai.xyz") {
-    throw new Error("Only referral links from https://app.renkai.xyz are accepted.");
-  }
-  const referrerPlayerId = url.searchParams.get("ref") ?? "";
-  if (!referrerPlayerId) throw new Error("The referral link has no ref query parameter.");
-  if (!referrerPlayerId || referrerPlayerId.length > 64 || !/^player_[A-Za-z0-9_-]+$/.test(referrerPlayerId)) {
-    throw new Error("Referral link must contain ?ref=player_... or use none.");
-  }
-  return { referrerPlayerId, providedAs: "link" };
-}
-
-export function registrationRequestBody(config) {
-  const creating = !config.agentKey;
-  return {
-    action: creating ? "create" : "rotate",
-    label: "renkai-player",
-    ...(creating && config.referral?.referrerPlayerId
-      ? { referrerPlayerId: config.referral.referrerPlayerId }
-      : {}),
-  };
-}
-
-async function register(configPath, config) {
-  let result;
-  try {
-    result = await agentRequest(
-      config,
-      "POST",
-      "/api/agent/key",
-      registrationRequestBody(config),
-      { requireKey: false, idempotent: true },
-    );
-  } catch (error) {
-    if (error.code !== "FORBIDDEN") throw error;
-    error.code = "WAITLIST_REQUIRED";
-    error.message = "This agent wallet is not approved yet. Renkai requires waitlist access; request it through Discord or X, then rerun register.";
-    error.waitlist = {
-      walletAddress: config.walletAddress,
-      discord: WAITLIST_ACCESS.discord,
-      x: WAITLIST_ACCESS.x,
-    };
-    throw error;
-  }
-  if (!result?.agentKey?.apiKey) throw new Error("The API did not return the one-time agent key. Run register again to rotate it.");
-  config.agentKey = result.agentKey.apiKey;
-  config.updatedAt = new Date().toISOString();
-  await writeConfig(configPath, config);
-  return { walletAddress: config.walletAddress, registered: true, keyStored: true };
-}
-
-async function setBattlePolicy(configPath, config, mode, targetCastleId) {
-  const body = battleBody(mode, targetCastleId);
-  const result = await agentRequest(config, "POST", "/api/war/policy", body, { idempotent: true });
-  config.battle = { mode: body.mode, targetCastleId: body.targetCastleId ?? null, updatedAt: result.policy.updatedAt };
-  config.updatedAt = new Date().toISOString();
-  await writeConfig(configPath, config);
-  return result;
-}
-
-async function clearBattlePolicy(configPath, config) {
-  const result = await agentRequest(config, "DELETE", "/api/war/policy", undefined, { idempotent: true });
-  config.battle = null;
-  config.updatedAt = new Date().toISOString();
-  await writeConfig(configPath, config);
-  return result;
-}
-
-async function setNextBattle(config, mode, targetCastleId) {
-  const instruction = battleBody(mode, targetCastleId);
-  const [warState, playerState] = await Promise.all([
-    agentRequest(config, "GET", "/api/war/state"),
-    agentRequest(config, "GET", "/api/player/state"),
-  ]);
-  const pledge = desiredPledge(instruction, playerState.player.castleId, warState.nextWarAt);
-  const state = await agentRequest(config, "POST", "/api/war/pledge", pledge, { idempotent: true });
-  return { scope: "next_battle", instruction, pledge, state };
-}
-
-async function clearNextBattle(config) {
-  const state = await agentRequest(config, "DELETE", "/api/war/pledge", undefined, { idempotent: true });
-  return { scope: "next_battle", instruction: null, state };
-}
-
-async function setup(configPath, flags) {
-  const direction = flags.direction;
-  if (!DIRECTIONS.has(direction)) throw new Error("--direction must be attacker, defender, blacksmith, or miner.");
-  const resources = (flags.resources ?? "common").split(",").map((value) => value.trim().toLowerCase()).filter(Boolean);
-  const goal = flags.goal ?? "balanced";
-  const requestedBaseUrl = flags["base-url"] ? new URL(flags["base-url"]).origin : null;
-  const desiredReferral = parseReferralInput(flags.referral);
-  let config;
-  let walletCreated = false;
-  try {
-    config = await readConfig(configPath);
-  } catch (error) {
-    if (!String(error.message).startsWith("No Renkai agent config")) throw error;
-    config = {
-      version: 3,
-      ...createWallet(),
-      baseUrl: requestedBaseUrl ?? DEFAULT_BASE_URL,
-      profile: { direction, resources, goal },
-      battle: null,
-      referral: desiredReferral,
-      automation: emptyAutomation(),
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-    walletCreated = true;
-  }
-  config.version = 3;
-  if (config.agentKey && config.referral?.referrerPlayerId !== desiredReferral?.referrerPlayerId) {
-    throw new Error("Referral attribution is immutable after agent registration. Keep the original referral choice.");
-  }
-  config.baseUrl = requestedBaseUrl ?? config.baseUrl ?? DEFAULT_BASE_URL;
-  config.profile = { direction, resources, goal };
-  config.referral = desiredReferral;
-  config.updatedAt = new Date().toISOString();
-  await writeConfig(configPath, config);
-  if (flags.offline) return { ...safeProfile(config), walletCreated, registration: "skipped" };
-  try {
-    const registration = config.agentKey ? { registered: true, keyStored: true } : await register(configPath, config);
-    return { ...safeProfile(config), walletCreated, ...registration, battleParticipation: config.battle ? "all_battles" : "not_participating" };
-  } catch (error) {
-    error.publicContext = { ...safeProfile(config), walletCreated, configSaved: true };
-    throw error;
-  }
-}
-
-function desiredPledge(policy, playerCastleId, nextWarAt) {
-  if (policy.mode === "defend") return { role: "defend", targetCastleId: playerCastleId };
-  if (policy.mode === "attack_fixed") return { role: "attack", targetCastleId: policy.targetCastleId };
-  return { role: "attack", targetCastleId: cycleTarget(playerCastleId, nextWarAt) };
-}
-
-async function ensureBattlePledge(configPath, config, warState, nowMs, request = agentRequest) {
-  if (!warState.policy) {
-    const error = new Error("No all-battles policy is configured.");
-    error.code = "NO_BATTLE_INSTRUCTION";
-    throw error;
-  }
-  const playerState = await request(config, "GET", "/api/player/state");
-  const desired = desiredPledge(warState.policy, playerState.player.castleId, warState.nextWarAt);
-  if (warState.pledge?.role === desired.role && warState.pledge?.targetCastleId === desired.targetCastleId) {
-    config.automation.lastRunAt = new Date(nowMs).toISOString();
-    config.automation.lastPledgedWindowId = warState.nextWindowId;
-    await writeConfig(configPath, config);
-    return { action: "pledge_ready", windowId: warState.nextWindowId, pledge: desired, nextWarAt: warState.nextWarAt };
-  }
-  if (nowMs >= Date.parse(warState.pledgeLockedAt)) {
-    if (config.automation.lastAlertedWindowId === warState.nextWindowId) {
-      return { action: "already_alerted", windowId: warState.nextWindowId };
-    }
-    config.automation.lastAlertedWindowId = warState.nextWindowId;
-    config.automation.lastRunAt = new Date(nowMs).toISOString();
-    await writeConfig(configPath, config);
-    const error = new Error(`The opted-in all-battles pledge was not installed before lock for ${warState.nextWindowId}.`);
-    error.code = "BATTLE_PLEDGE_MISSED";
-    throw error;
-  }
-  try {
-    await request(config, "POST", "/api/war/pledge", desired, { idempotent: true });
-    config.automation.lastPledgedWindowId = warState.nextWindowId;
-    config.automation.lastAlertedWindowId = null;
-    config.automation.lastRunAt = new Date(nowMs).toISOString();
-    await writeConfig(configPath, config);
-    return { action: "pledged", windowId: warState.nextWindowId, pledge: desired, nextWarAt: warState.nextWarAt };
-  } catch (error) {
-    if (error.code === "PLAYER_LOCKED" || error.code === "WAR_PLEDGE_LOCKED" || error.status >= 500) {
-      config.automation.lastRunAt = new Date(nowMs).toISOString();
-      await writeConfig(configPath, config);
-      return { action: "retry", windowId: warState.nextWindowId, retryAt: warState.pledgeLockedAt, reason: error.code };
-    }
-    throw error;
-  }
-}
-
-export async function battleTick(configPath, config, options = {}) {
-  const nowMs = options.nowMs ?? Date.now();
-  const localWindow = battleWindowContext(nowMs);
-  if (!localWindow.inReserve && !options.force) return { action: "outside_reserve", nextReserveAt: localWindow.reserveAt };
-  const request = options.request ?? agentRequest;
-  let warState = options.warState;
-  if (!warState) {
-    try {
-      warState = await request(config, "GET", "/api/war/state");
-    } catch (error) {
-      if (!localWindow.locked) return { action: "retry", windowId: localWindow.windowId, retryAt: localWindow.pledgeLockedAt, reason: error.code ?? "TEMPORARY_ERROR" };
-      if (config.automation.lastAlertedWindowId === localWindow.windowId) return { action: "already_alerted", windowId: localWindow.windowId };
-      config.automation.lastAlertedWindowId = localWindow.windowId;
-      config.automation.lastRunAt = new Date(nowMs).toISOString();
-      await writeConfig(configPath, config);
-      const missed = new Error(`The opted-in all-battles pledge could not be verified before lock for ${localWindow.windowId}: ${error.message}`);
-      missed.code = "BATTLE_PLEDGE_MISSED";
-      throw missed;
-    }
-  }
-  const reserveAt = Date.parse(warState.nextWarAt) - WAR_RESERVE_MS;
-  if (nowMs < reserveAt || nowMs >= Date.parse(warState.nextWarAt)) {
-    return { action: "outside_reserve", nextReserveAt: new Date(reserveAt).toISOString() };
-  }
-  if (!warState.policy) {
-    return {
-      action: warState.pledge ? "next_battle_ready" : "no_battle_instruction",
-      windowId: warState.nextWindowId,
-      pledge: warState.pledge ?? null,
-      nextWarAt: warState.nextWarAt,
-    };
-  }
-  try {
-    return await ensureBattlePledge(configPath, config, warState, nowMs, request);
-  } catch (error) {
-    if (nowMs < Date.parse(warState.pledgeLockedAt)) {
-      config.automation.lastRunAt = new Date(nowMs).toISOString();
-      await writeConfig(configPath, config);
-      return { action: "retry", windowId: warState.nextWindowId, retryAt: warState.pledgeLockedAt, reason: error.code ?? "TEMPORARY_ERROR" };
-    }
-    if (error.code === "BATTLE_PLEDGE_MISSED") throw error;
-    if (config.automation.lastAlertedWindowId === warState.nextWindowId) {
-      return { action: "already_alerted", windowId: warState.nextWindowId };
-    }
-    config.automation.lastAlertedWindowId = warState.nextWindowId;
-    config.automation.lastRunAt = new Date(nowMs).toISOString();
-    await writeConfig(configPath, config);
-    const missed = new Error(`The opted-in all-battles pledge could not be verified before lock for ${warState.nextWindowId}: ${error.message}`);
-    missed.code = "BATTLE_PLEDGE_MISSED";
-    throw missed;
-  }
-}
-
-async function takeStep(configPath, config) {
-  const nowMs = Date.now();
-  const warState = await agentRequest(config, "GET", "/api/war/state");
-  const inReserve = nowMs >= Date.parse(warState.nextWarAt) - WAR_RESERVE_MS && nowMs < Date.parse(warState.nextWarAt);
-  if (warState.policy && inReserve) {
-    const battle = await ensureBattlePledge(configPath, config, warState, nowMs);
-    return { ...battle, action: battle.action === "retry" ? "wait" : battle.action, reason: "all_battles_reserve", retryAt: warState.nextWarAt };
-  }
-  if (warState.pledge && inReserve) {
-    return { action: "wait", reason: "next_battle_reserved", pledge: warState.pledge, retryAt: warState.nextWarAt };
-  }
-  const state = await agentRequest(config, "GET", "/api/player/state");
-  const player = state.player;
-  if (state.activeQuestAction) {
-    return { action: "wait", reason: "quest_in_progress", quest: state.activeQuestAction.questName, retryAt: state.activeQuestAction.lockedUntil };
-  }
-  const desiredClass = config.profile.direction;
-  const desiredBranch = BRANCH_BY_DIRECTION[desiredClass];
-  if (player.level >= 5 && !player.branch && player.gold >= 50) {
-    return { action: "selected_branch", branch: desiredBranch, result: await agentRequest(config, "POST", "/api/player/branch", { branch: desiredBranch }, { idempotent: true }) };
-  }
-  if (player.level >= 15 && player.branch && !player.class && player.gold >= 100) {
-    return { action: "selected_class", class: desiredClass, result: await agentRequest(config, "POST", "/api/player/class", { class: desiredClass }, { idempotent: true }) };
-  }
-  const progressionPending = player.level >= 5 && !player.branch
-    ? { selection: "branch", value: desiredBranch, requiredGold: 50, currentGold: player.gold }
-    : player.level >= 15 && player.branch && !player.class
-      ? { selection: "class", value: desiredClass, requiredGold: 100, currentGold: player.gold }
-      : undefined;
-  if (player.status !== "idle" && player.status !== "rest") {
-    return { action: "wait", reason: "player_locked", status: player.status, retryAt: player.lockedUntil, progressionPending };
-  }
-  if (player.currentStamina < 1) return { action: "wait", reason: "no_stamina", retryAt: player.nextStaminaAt, progressionPending };
-  const questData = await agentRequest(config, "GET", "/api/quests");
-  const preferredArchetype = chooseQuestArchetype(config.profile);
-  const quest = questData.quests.find((candidate) => candidate.archetype === preferredArchetype) ?? questData.quests[0];
-  if (!quest) return { action: "wait", reason: "no_available_quests" };
-  const started = await agentRequest(config, "POST", "/api/quest/start", { questId: quest.id }, { idempotent: true });
-  const incompatibleResources = (config.profile.resources ?? []).filter((resource) => RESOURCE_CASTLE[resource] && RESOURCE_CASTLE[resource] !== player.castleId);
-  return {
-    action: "started_quest",
-    quest: { id: quest.id, name: quest.name, archetype: quest.archetype },
-    retryAt: started.questAction.lockedUntil,
-    progressionPending,
-    resourceFocusWarning: incompatibleResources.length
-      ? `The assigned castle ${player.castleId} does not directly favor: ${incompatibleResources.join(", ")}.`
-      : undefined,
-  };
-}
-
-export function runRuntimeCommand(binary, args) {
-  return { stdout: execFileSync(binary, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim() };
-}
-
-function parseJobId(output) {
-  try {
-    const parsed = JSON.parse(output);
-    return parsed.id ?? parsed.jobId ?? parsed.job?.id ?? null;
-  } catch {
-    return output.match(/\b[0-9a-f]{8,64}\b/i)?.[0] ?? null;
-  }
-}
-
-function stripAnsi(value) {
-  return String(value ?? "").replace(/\x1B\[[0-?]*[ -\/]*[@-~]/g, "");
-}
-
-function jobsFromJson(value, jobs = []) {
-  if (Array.isArray(value)) {
-    for (const item of value) jobsFromJson(item, jobs);
-    return jobs;
-  }
-  if (!value || typeof value !== "object") return jobs;
-  const id = value.id ?? value.jobId ?? value.job_id;
-  const name = value.name ?? value.jobName ?? value.job_name;
-  if (id && name) jobs.push({ id: String(id), name: String(name) });
-  for (const nested of Object.values(value)) jobsFromJson(nested, jobs);
-  return jobs;
-}
-
-export function namedJobIds(output, expectedName) {
-  const plain = stripAnsi(output);
-  try {
-    const parsed = jobsFromJson(JSON.parse(plain));
-    return [...new Set(parsed.filter((job) => job.name === expectedName).map((job) => job.id))];
-  } catch {
-    // Hermes renders each job as a blank-line-separated block with the ID first
-    // and an indented `Name:` field. Keep the parser strict so unrelated jobs
-    // are never removed.
-  }
-  const ids = [];
-  for (const block of plain.split(/\n\s*\n/)) {
-    const name = block.match(/^\s*Name:\s*(.+?)\s*$/mi)?.[1];
-    if (name !== expectedName) continue;
-    const id = block.match(/^\s*([A-Za-z0-9_-]{6,})\b/m)?.[1];
-    if (id) ids.push(id);
-  }
-  return [...new Set(ids)];
-}
-
-export function resolveHermesScriptsDir(options = {}) {
-  const env = options.env ?? process.env;
-  const pathExists = options.pathExists ?? existsSync;
-  if (env.HERMES_HOME) return join(resolve(env.HERMES_HOME), "scripts");
-  // Hermes Docker mounts its persistent data at /opt/data. Some Gateway
-  // launch paths have historically omitted HERMES_HOME from child processes,
-  // so detect the mounted directory before falling back to a host install.
-  if (pathExists("/opt/data")) return "/opt/data/scripts";
-  return join(options.homeDir ?? homedir(), ".hermes", "scripts");
-}
-
-function notificationFrom(flags, existing) {
-  if (flags["notify-channel"]) return { channel: flags["notify-channel"], recipient: flags["notify-to"] ?? null };
-  if (existing?.channel) return existing;
-  throw new Error("Automation installation requires --notify-channel and, when applicable, --notify-to.");
-}
-
-function hermesDelivery(notification) {
-  return notification.recipient ? `${notification.channel}:${notification.recipient}` : notification.channel;
-}
-
-function openClawDeliveryArgs(notification) {
-  if (notification.channel === "origin") return ["--announce", "--session", "current"];
-  if (!notification.recipient) throw new Error("OpenClaw requires --notify-to for a named notification channel.");
-  return ["--announce", "--channel", notification.channel, "--to", notification.recipient];
-}
-
-function runtimeList(runtime, runner) {
-  const binary = runtime === "hermes" ? "hermes" : "openclaw";
-  return runner(binary, ["cron", "list", ...(runtime === "openclaw" ? ["--json"] : [])]).stdout;
-}
-
-function removeNamedJobs(runtime, name, runner, listedOutput) {
-  const binary = runtime === "hermes" ? "hermes" : "openclaw";
-  const output = listedOutput ?? runtimeList(runtime, runner);
-  const ids = namedJobIds(output, name);
-  for (const id of ids) runner(binary, ["cron", "remove", id]);
-  return ids;
-}
-
-async function requireLiveBattlePolicy(config, options = {}) {
-  const request = options.request ?? agentRequest;
-  const livePolicy = options.livePolicy ?? await request(config, "GET", "/api/war/policy");
-  if (!livePolicy?.policy) {
-    const error = new Error("The server has no all-battles policy. Set one before installing battle automation.");
-    error.code = "NO_BATTLE_INSTRUCTION";
-    throw error;
-  }
-  return livePolicy;
-}
-
-export async function automationStatus(config, options = {}) {
-  const runner = options.runner ?? runRuntimeCommand;
-  if (!config.automation.runtime) return { installed: false, runtime: null, jobId: null };
-  try {
-    const output = runtimeList(config.automation.runtime, runner);
-    const jobPresent = output.includes(config.automation.jobId ?? AUTOMATION_NAME) || namedJobIds(output, AUTOMATION_NAME).length > 0;
-    const scriptPath = config.automation.scriptPath
-      ?? (config.automation.runtime === "hermes" ? join(resolveHermesScriptsDir(options), `${AUTOMATION_NAME}.sh`) : null);
-    const scriptPresent = config.automation.runtime !== "hermes" || existsSync(scriptPath);
-    return {
-      installed: jobPresent && scriptPresent,
-      runtime: config.automation.runtime,
-      jobId: config.automation.jobId,
-      scriptPath,
-      scriptPresent,
-      lastRunAt: config.automation.lastRunAt,
-    };
-  } catch (error) {
-    return { installed: false, runtime: config.automation.runtime, jobId: config.automation.jobId, error: error.message };
-  }
-}
-
 export async function installAutomation(configPath, config, runtime, flags, options = {}) {
-  if (runtime !== "hermes" && runtime !== "openclaw") throw new Error("--runtime must be hermes or openclaw.");
-  if (!config.agentKey || !config.battle) throw new Error("Register the wallet and set battle policy before installing automation.");
-  const runner = options.runner ?? runRuntimeCommand;
-  const livePolicy = await requireLiveBattlePolicy(config, options);
-  config.battle = {
-    mode: livePolicy.policy.mode,
-    targetCastleId: livePolicy.policy.targetCastleId ?? null,
-    updatedAt: livePolicy.policy.updatedAt,
-  };
-  const notification = notificationFrom(flags, config.automation.notification);
-
-  let creation;
-  let wrapperPath = null;
-  if (runtime === "hermes") {
-    const scriptsDir = options.hermesScriptsDir ?? resolveHermesScriptsDir(options);
-    wrapperPath = join(scriptsDir, `${AUTOMATION_NAME}.sh`);
-    await mkdir(scriptsDir, { recursive: true, mode: 0o700 });
-    const cliPath = fileURLToPath(import.meta.url);
-    const quote = (value) => `'${String(value).replaceAll("'", `'\\''`)}'`;
-    await writeFile(wrapperPath, `#!/usr/bin/env bash\nexec ${quote(process.execPath)} ${quote(cliPath)} battle-tick --quiet --config ${quote(configPath)}\n`, { mode: 0o700 });
-    await chmod(wrapperPath, 0o700);
-    runner("/bin/bash", [wrapperPath]);
-  }
-
-  const existingList = runtimeList(runtime, runner);
-  const removedLegacyJobIds = [
-    ...removeNamedJobs(runtime, LEGACY_BATTLE_AUTOMATION_NAME, runner, existingList),
-    ...removeNamedJobs(runtime, LEGACY_QUEST_AUTOMATION_NAME, runner, existingList),
-  ];
-  const existingJobIds = namedJobIds(existingList, AUTOMATION_NAME);
-  if (existingJobIds.length === 1) {
-    const jobId = existingJobIds[0];
-    runner(runtime === "hermes" ? "hermes" : "openclaw", ["cron", "run", jobId, ...(runtime === "openclaw" ? ["--wait"] : [])]);
-    config.automation = {
-      ...config.automation,
-      runtime,
-      jobId,
-      scriptPath: wrapperPath,
-      notification,
-      lastRunAt: new Date().toISOString(),
-    };
-    await writeConfig(configPath, config);
-    return {
-      installed: true,
-      duplicate: false,
-      existing: true,
-      runtime,
-      jobId,
-      scriptPath: wrapperPath,
-      removedLegacyJobIds,
-      testRun: "passed",
-    };
-  }
-  const removedDuplicateJobIds = existingJobIds.length > 1
-    ? removeNamedJobs(runtime, AUTOMATION_NAME, runner, existingList)
-    : [];
-  if (existingList.includes(AUTOMATION_NAME) && existingJobIds.length === 0) {
-    throw new Error(`Could not safely identify the existing ${AUTOMATION_NAME} job by ID; run hermes cron list and remove its exact ID before retrying.`);
-  }
-
-  if (runtime === "hermes") {
-    creation = runner("hermes", [
-      "cron", "create", "every 1m", "--no-agent", "--script", `${AUTOMATION_NAME}.sh`,
-      "--deliver", hermesDelivery(notification), "--name", AUTOMATION_NAME,
-    ]);
-  } else {
-    const argv = [process.execPath, fileURLToPath(import.meta.url), "battle-tick", "--quiet", "--config", configPath];
-    creation = runner("openclaw", [
-      "cron", "create", "* * * * *", "--name", AUTOMATION_NAME,
-      "--command-argv", JSON.stringify(argv), "--tz", "UTC", "--exact",
-      ...openClawDeliveryArgs(notification),
-    ]);
-  }
-  const jobId = parseJobId(creation.stdout) ?? AUTOMATION_NAME;
-  runner(runtime === "hermes" ? "hermes" : "openclaw", ["cron", "run", jobId, ...(runtime === "openclaw" ? ["--wait"] : [])]);
-  config.automation = { ...config.automation, runtime, jobId, scriptPath: wrapperPath, notification, lastRunAt: new Date().toISOString() };
-  await writeConfig(configPath, config);
-  return {
-    installed: true,
-    duplicate: false,
-    existing: false,
-    runtime,
-    jobId,
-    scriptPath: wrapperPath,
-    removedDuplicateJobIds,
-    removedLegacyJobIds,
-    testRun: "passed",
-  };
+  return installAutomationForEntry(ROOT_ENTRY_PATH, configPath, config, runtime, flags, options);
 }
 
 export async function repairAutomation(configPath, config, runtime, flags, options = {}) {
-  const runner = options.runner ?? runRuntimeCommand;
-  const selectedRuntime = runtime ?? config.automation.runtime;
-  if (!selectedRuntime) throw new Error("--runtime must be hermes or openclaw.");
-  const livePolicy = await requireLiveBattlePolicy(config, options);
-  const listed = runtimeList(selectedRuntime, runner);
-  removeNamedJobs(selectedRuntime, AUTOMATION_NAME, runner, listed);
-  removeNamedJobs(selectedRuntime, LEGACY_BATTLE_AUTOMATION_NAME, runner, listed);
-  removeNamedJobs(selectedRuntime, LEGACY_QUEST_AUTOMATION_NAME, runner, listed);
-  config.automation.jobId = null;
-  config.automation.scriptPath = null;
-  return installAutomation(configPath, config, selectedRuntime, flags, { ...options, livePolicy });
-}
-
-export async function uninstallAutomation(configPath, config, runtime, options = {}) {
-  const runner = options.runner ?? runRuntimeCommand;
-  const selectedRuntime = runtime ?? config.automation.runtime;
-  const removedJobIds = [];
-  if (selectedRuntime) {
-    if (selectedRuntime !== "hermes" && selectedRuntime !== "openclaw") throw new Error("--runtime must be hermes or openclaw.");
-    const listed = runtimeList(selectedRuntime, runner);
-    removedJobIds.push(...removeNamedJobs(selectedRuntime, AUTOMATION_NAME, runner, listed));
-    removedJobIds.push(...removeNamedJobs(selectedRuntime, LEGACY_BATTLE_AUTOMATION_NAME, runner, listed));
-    removedJobIds.push(...removeNamedJobs(selectedRuntime, LEGACY_QUEST_AUTOMATION_NAME, runner, listed));
-  }
-  config.automation = emptyAutomation();
-  await writeConfig(configPath, config);
-  return { installed: false, runtime: selectedRuntime ?? null, removedJobIds };
+  return repairAutomationForEntry(ROOT_ENTRY_PATH, configPath, config, runtime, flags, options);
 }
 
 async function doctor(configPath, flags) {
@@ -829,7 +127,7 @@ async function doctor(configPath, flags) {
 }
 
 function print(value, quiet = false) {
-  if (!quiet) process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+  if (!quiet) process.stdout.write(JSON.stringify(value, null, 2) + "\n");
 }
 
 function help() {
@@ -878,7 +176,7 @@ export async function main(argv = process.argv.slice(2)) {
   if (command === "automation" && subcommand === "uninstall") {
     return print(await uninstallAutomation(configPath, config, flags.runtime));
   }
-  throw new Error(`Unknown command: ${command}${subcommand ? ` ${subcommand}` : ""}`);
+  throw new Error("Unknown command: " + command + (subcommand ? " " + subcommand : ""));
 }
 
 export function cliErrorOutput(error) {
@@ -893,7 +191,7 @@ export function cliErrorOutput(error) {
 const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : "";
 if (import.meta.url === invokedPath) {
   main().catch((error) => {
-    process.stderr.write(`${JSON.stringify(cliErrorOutput(error), null, 2)}\n`);
+    process.stderr.write(JSON.stringify(cliErrorOutput(error), null, 2) + "\n");
     process.exitCode = 1;
   });
 }
