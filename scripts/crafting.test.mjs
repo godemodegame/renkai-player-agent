@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rmdir, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -12,6 +12,7 @@ import {
 import {
   runCraftingCommand,
 } from "./lib/crafting.mjs";
+import { notificationLockPath } from "./lib/config.mjs";
 import { mutationStatePath, readMutationState } from "./lib/mutations.mjs";
 
 function testConfig() {
@@ -405,7 +406,11 @@ test("retains mutation identity until the validated receipt is written", async (
   const flags = { recipe: "recipe_receipt", confirm: "recipe_receipt" };
   const onResult = async () => {
     writes += 1;
-    if (writes === 1) throw new Error("stdout closed");
+    if (writes === 1) {
+      const error = new Error("stdout closed");
+      error.status = 400;
+      throw error;
+    }
   };
   await assert.rejects(
     runCraftingCommand(config, "start", flags, { request, configPath: path, onResult }),
@@ -414,6 +419,32 @@ test("retains mutation identity until the validated receipt is written", async (
   assert.equal((await readMutationState(path)).pending.idempotencyKey, keys[0]);
   await runCraftingCommand(config, "start", flags, { request, configPath: path, onResult });
   assert.equal(keys[0], keys[1]);
+  assert.equal((await readMutationState(path)).pending, null);
+});
+
+test("does not turn delivered success into failure when lock cleanup fails", async () => {
+  const path = await configPath();
+  const lockPath = notificationLockPath(path);
+  const keys = [];
+  const result = await runCraftingCommand(
+    testConfig(),
+    "start",
+    { recipe: "recipe_release", confirm: "recipe_release" },
+    {
+      configPath: path,
+      request: async (_config, _method, _path, _body, options) => {
+        keys.push(options.idempotencyKey);
+        return { craftingJobId: "job_release", readyAt: "2099-01-01T00:01:00.000Z" };
+      },
+      onResult: async () => {
+        await unlink(lockPath);
+        await mkdir(lockPath);
+      },
+    },
+  );
+  await rmdir(lockPath);
+  assert.equal(result.craftingJobId, "job_release");
+  assert.equal(keys.length, 1);
   assert.equal((await readMutationState(path)).pending, null);
 });
 

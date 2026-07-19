@@ -74,16 +74,17 @@ export async function runDurableMutation(configPath, operation, execute, onResul
     }
     const pending = state.pending ?? { operation, idempotencyKey: randomUUID(), createdAt: new Date().toISOString() };
     if (!state.pending) await writeJsonAtomic(statePath, { version: 1, pending });
+    let result;
     try {
-      const result = await execute(pending.idempotencyKey);
-      if (onResult) await onResult(result);
-      await writeJsonAtomic(statePath, emptyMutationState());
-      return result;
+      result = await execute(pending.idempotencyKey);
     } catch (error) {
       if (definitelyNotCommitted(error)) await writeJsonAtomic(statePath, emptyMutationState());
       throw error;
     }
+    if (onResult) await onResult(result);
+    await writeJsonAtomic(statePath, emptyMutationState());
+    return result;
   } finally {
-    await releaseNotificationLock(lock);
+    await releaseNotificationLock(lock).catch(() => {});
   }
 }
