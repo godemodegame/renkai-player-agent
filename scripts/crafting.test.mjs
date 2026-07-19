@@ -74,7 +74,16 @@ test("maps every crafting subcommand to its canonical route", async () => {
       return jsonResponse({
         serverTime: "2099-01-01T00:00:00.000Z",
         nextRecommendedPollAt: readyAt,
-        data: { jobs: [{ craftingJobId: jobId, recipeId: recipe.id, status: "in_progress", readyAt }] },
+        data: { jobs: [{
+          craftingJobId: jobId,
+          recipeId: recipe.id,
+          status: "in_progress",
+          startedAt: "2099-01-01T00:00:00.000Z",
+          readyAt,
+          claimedAt: null,
+          mintStatus: null,
+          mintError: null,
+        }] },
       });
     }
     if (path === "/api/crafting/request") return jsonResponse({ data: { craftingJobId: jobId, readyAt } });
@@ -94,7 +103,16 @@ test("maps every crafting subcommand to its canonical route", async () => {
 
     const list = await runCraftingCommand(config, "list", {}, options);
     assert.deepEqual(list, {
-      jobs: [{ craftingJobId: jobId, recipeId: recipe.id, status: "in_progress", readyAt }],
+      jobs: [{
+        craftingJobId: jobId,
+        recipeId: recipe.id,
+        status: "in_progress",
+        startedAt: "2099-01-01T00:00:00.000Z",
+        readyAt,
+        claimedAt: null,
+        mintStatus: null,
+        mintError: null,
+      }],
       nextRecommendedPollAt: readyAt,
     });
 
@@ -151,10 +169,20 @@ test("preserves crafting polling hints and keeps legacy responses data-only", as
     globalThis.fetch = originalFetch;
   }
 
+  const completedJob = {
+    craftingJobId: "done",
+    recipeId: "recipe_done",
+    status: "complete",
+    startedAt: "2099-01-01T00:00:00.000Z",
+    readyAt: "2099-01-01T00:01:00.000Z",
+    claimedAt: "2099-01-01T00:02:00.000Z",
+    mintStatus: "minted",
+    mintError: null,
+  };
   const noHint = await runCraftingCommand(config, "list", {}, {
-    requestWithMetadata: async () => ({ data: { jobs: [{ craftingJobId: "done", status: "complete" }] } }),
+    requestWithMetadata: async () => ({ data: { jobs: [completedJob] } }),
   });
-  assert.deepEqual(noHint, { jobs: [{ craftingJobId: "done", status: "complete" }], nextRecommendedPollAt: null });
+  assert.deepEqual(noHint, { jobs: [completedJob], nextRecommendedPollAt: null });
 });
 
 test("rejects cleartext remote API origins before signing or fetch", async () => {
@@ -257,4 +285,73 @@ test("fails closed on malformed success and reuses durable mutation identity", a
   );
   await runCraftingCommand(config, "start", nextFlags, { request: malformedRequest, configPath: path });
   assert.equal(malformedKeys[0], malformedKeys[1]);
+});
+
+test("fails closed on malformed nested recipe and job contracts", async () => {
+  const config = testConfig();
+  for (const malformed of [
+    { recipes: [{}] },
+    { recipes: [{ id: "recipe_only" }] },
+  ]) {
+    await assert.rejects(
+      runCraftingCommand(config, "recipes", {}, { request: async () => malformed }),
+      (error) => error.code === "API_RESPONSE_INVALID",
+    );
+  }
+  for (const malformed of [
+    { jobs: [{}] },
+    {
+      jobs: [{
+        craftingJobId: "job_1",
+        recipeId: "recipe_1",
+        status: "in_progress",
+        startedAt: "not-a-time",
+        readyAt: "",
+        claimedAt: null,
+        mintStatus: null,
+        mintError: null,
+      }],
+    },
+  ]) {
+    await assert.rejects(
+      runCraftingCommand(config, "list", {}, { requestWithMetadata: async () => ({ data: malformed }) }),
+      (error) => error.code === "API_RESPONSE_INVALID",
+    );
+  }
+  await assert.rejects(
+    runCraftingCommand(
+      config,
+      "start",
+      { recipe: "recipe_1", confirm: "recipe_1" },
+      {
+        configPath: await configPath(),
+        request: async () => ({ craftingJobId: "job_1", readyAt: "not-a-time" }),
+      },
+    ),
+    (error) => error.code === "API_RESPONSE_INVALID",
+  );
+});
+
+test("retains mutation identity until the validated receipt is written", async () => {
+  const config = testConfig();
+  const path = await configPath();
+  const keys = [];
+  let writes = 0;
+  const request = async (_config, _method, _path, _body, options) => {
+    keys.push(options.idempotencyKey);
+    return { craftingJobId: "job_receipt", readyAt: "2099-01-01T00:01:00.000Z" };
+  };
+  const flags = { recipe: "recipe_receipt", confirm: "recipe_receipt" };
+  const onResult = async () => {
+    writes += 1;
+    if (writes === 1) throw new Error("stdout closed");
+  };
+  await assert.rejects(
+    runCraftingCommand(config, "start", flags, { request, configPath: path, onResult }),
+    /stdout closed/,
+  );
+  assert.equal((await readMutationState(path)).pending.idempotencyKey, keys[0]);
+  await runCraftingCommand(config, "start", flags, { request, configPath: path, onResult });
+  assert.equal(keys[0], keys[1]);
+  assert.equal((await readMutationState(path)).pending, null);
 });

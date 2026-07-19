@@ -131,7 +131,7 @@ test("routes inventory and crafting through the executable surface", async () =>
     const body = options.body ? JSON.parse(options.body) : undefined;
     requests.push({ method: options.method ?? "GET", path, body });
     const data = path.startsWith("/api/inventory")
-      ? { observedAt: "2026-07-19T00:00:00.000Z", resources: {}, gear: { items: [], nextCursor: null }, weight: { system: "castle_population", activeWeight: 1, capacityWeight: null } }
+      ? { observedAt: "2026-07-19T00:00:00.000Z", resources: { items: [], totalCount: 0 }, gear: { items: [], nextCursor: null }, weight: { system: "castle_population", activeWeight: 1, capacityWeight: null } }
       : { craftingJobId: "job_1", readyAt: "2026-07-19T00:05:00.000Z" };
     return new Response(JSON.stringify({ data }), { status: 200, headers: { "Content-Type": "application/json" } });
   };

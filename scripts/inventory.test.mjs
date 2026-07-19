@@ -209,6 +209,20 @@ test("rejects invalid limits and cursors before signing or requesting", async ()
   assert.equal(calls, 0);
 });
 
+test("fails closed on malformed inventory success payloads", async () => {
+  for (const payload of [
+    {},
+    { ...inventoryPayload(), observedAt: "not-a-time" },
+    { ...inventoryPayload(), resources: { items: [{}], totalCount: 1 } },
+    { ...inventoryPayload(), gear: { items: [{}], nextCursor: null } },
+  ]) {
+    await assert.rejects(
+      readInventory({}, {}, { request: async () => payload }),
+      (error) => error.code === "API_RESPONSE_INVALID",
+    );
+  }
+});
+
 test("prints one unchanged structured payload and never mutates", async () => {
   const config = testConfig();
   const payload = inventoryPayload();

@@ -45,9 +45,9 @@ async function httpFixture(handler) {
   };
 }
 
-async function configFixture(baseUrl) {
+async function configFixture(baseUrl, filename = "agent.json") {
   const directory = await mkdtemp(join(tmpdir(), "renkai-cli-e2e-"));
-  const configPath = join(directory, "agent.json");
+  const configPath = join(directory, filename);
   const config = {
     version: 3,
     ...createWallet(),
@@ -83,7 +83,23 @@ test("runs notification status inventory and crafting through the real CLI", asy
     if (request.url === "/api/inventory?limit=25&cursor=cursor_1") {
       return send(response, { data: { observedAt: "2026-07-19T00:00:00.000Z", resources: { items: [], totalCount: 0 }, gear: { items: [], nextCursor: null }, weight: { system: "castle_population", activeWeight: 1, capacityWeight: null } } });
     }
-    if (request.url === "/api/crafting/recipes") return send(response, { data: { recipes: [{ id: "recipe_1" }] } });
+    if (request.url === "/api/crafting/recipes") {
+      return send(response, { data: { recipes: [{
+        id: "recipe_1",
+        name: "Iron Knife",
+        tier: 1,
+        slot: "weapon",
+        requiredStation: "forge",
+        requiredPlayerLevel: 5,
+        requiredCastleId: "ashkeep",
+        requiredBranch: "laborer",
+        durationSeconds: 60,
+        gearPower: 4,
+        bonuses: {},
+        costGold: 10,
+        costResources: { iron: 1 },
+      }] } });
+    }
     return send(response, { error: { code: "NOT_FOUND", message: request.url } }, 404);
   });
   const { config, configPath } = await configFixture(fixture.baseUrl);
@@ -110,6 +126,23 @@ test("runs notification status inventory and crafting through the real CLI", asy
     const output = status.stdout + inventory.stdout + recipes.stdout;
     assert.equal(output.includes(config.privateKeyPkcs8), false);
     assert.equal(output.includes(config.agentKey), false);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("drains notifications when the config filename ends with the sidecar suffix", async () => {
+  const fixture = await httpFixture(async (request, response) => {
+    if (request.url === "/api/player/state") return send(response, { data: { player: { level: 7 } } });
+    if (request.url === "/api/notifications?limit=50") return send(response, { data: { items: [], nextCursor: null } });
+    return send(response, { error: { code: "NOT_FOUND", message: request.url } }, 404);
+  });
+  const { configPath } = await configFixture(fixture.baseUrl, "agent.notifications.json");
+  try {
+    const result = await runCli(["status", "--config", configPath]);
+    assert.equal(result.code, 0);
+    assert.equal(JSON.parse(result.stdout).action, "status");
+    assert.deepEqual(await readNotificationState(configPath), emptyNotificationState());
   } finally {
     await fixture.close();
   }

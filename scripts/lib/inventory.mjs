@@ -50,9 +50,60 @@ function requestFrom(options) {
   return options?.request ?? agentRequest;
 }
 
+function invalidResponse() {
+  const error = new Error("Renkai returned an invalid inventory response.");
+  error.code = "API_RESPONSE_INVALID";
+  return error;
+}
+
+function isRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isString(value) {
+  return typeof value === "string" && value.length > 0;
+}
+
+function isNullableString(value) {
+  return value === null || isString(value);
+}
+
+function isNumberRecord(value) {
+  return isRecord(value) && Object.entries(value).every(([key, amount]) => key.length > 0 && Number.isFinite(amount));
+}
+
+function isResource(item) {
+  return isRecord(item) && isString(item.resourceId) && isString(item.category)
+    && Number.isFinite(item.amount) && item.amount >= 0;
+}
+
+const GEAR_STATES = new Set(["mint_pending", "mint_failed_recoverable", "equipped", "attuned", "owned"]);
+
+function isGear(item) {
+  return isRecord(item) && isString(item.id) && isString(item.recipeId)
+    && (item.name === null || isString(item.name)) && isString(item.slot) && isString(item.tier)
+    && isNullableString(item.requiredBranch) && isNumberRecord(item.bonuses)
+    && Number.isFinite(item.durability) && typeof item.attuned === "boolean"
+    && typeof item.isEquipped === "boolean" && Number.isFinite(item.power)
+    && isNullableString(item.mintAddress) && GEAR_STATES.has(item.state);
+}
+
+function validateInventory(value) {
+  if (!isRecord(value) || !isString(value.observedAt) || !Number.isFinite(Date.parse(value.observedAt))
+    || !isRecord(value.resources) || !Array.isArray(value.resources.items) || !value.resources.items.every(isResource)
+    || !Number.isInteger(value.resources.totalCount) || value.resources.totalCount < value.resources.items.length
+    || !isRecord(value.gear) || !Array.isArray(value.gear.items) || !value.gear.items.every(isGear)
+    || !isNullableString(value.gear.nextCursor) || !isRecord(value.weight)
+    || value.weight.system !== "castle_population" || !Number.isFinite(value.weight.activeWeight)
+    || !(value.weight.capacityWeight === null || Number.isFinite(value.weight.capacityWeight))) {
+    throw invalidResponse();
+  }
+  return value;
+}
+
 export async function readInventory(config, flags = {}, options = {}) {
   const path = inventoryPath(flags);
-  return requestFrom(options)(config, "GET", path);
+  return validateInventory(await requestFrom(options)(config, "GET", path));
 }
 
 export async function handleInventory(config, flags = {}, options = {}) {

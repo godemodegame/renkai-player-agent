@@ -229,10 +229,14 @@ test("keeps private and API keys out of stdout and serialized CLI errors", async
 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response(JSON.stringify({
-    error: { code: "FORBIDDEN", message: "This wallet has not been granted game access." },
+    error: {
+      code: "FORBIDDEN",
+      message: `Rejected ${config.agentKey}`,
+      details: { reflectedKey: config.agentKey, reflectedPrivateKey: config.privateKeyPkcs8 },
+    },
   }), { status: 403, headers: { "Content-Type": "application/json" } });
   try {
-    await assert.rejects(main(["register", "--config", configPath]), (error) => {
+    await assert.rejects(main(["state", "--config", configPath]), (error) => {
       const serialized = JSON.stringify(cliErrorOutput(error));
       assert.equal(serialized.includes(config.privateKeyPkcs8), false);
       assert.equal(serialized.includes(config.agentKey), false);

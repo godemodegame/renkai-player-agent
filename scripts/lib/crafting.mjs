@@ -54,21 +54,81 @@ function requireObject(value, command) {
   return value;
 }
 
+function isString(value) {
+  return typeof value === "string" && value.length > 0;
+}
+
+function isNullableString(value) {
+  return value === null || isString(value);
+}
+
+function isTimestamp(value) {
+  return isString(value) && Number.isFinite(Date.parse(value));
+}
+
+function isNumberRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value)
+    && Object.entries(value).every(([key, amount]) => key.length > 0 && Number.isFinite(amount));
+}
+
+function isNonnegativeNumberRecord(value) {
+  return isNumberRecord(value) && Object.values(value).every((amount) => amount >= 0);
+}
+
+function isRecipe(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value)
+    && isString(value.id)
+    && isNullableString(value.name)
+    && Number.isInteger(value.tier) && value.tier > 0
+    && isString(value.slot)
+    && isString(value.requiredStation)
+    && Number.isInteger(value.requiredPlayerLevel) && value.requiredPlayerLevel >= 0
+    && isNullableString(value.requiredCastleId)
+    && ["fighter", "laborer", null].includes(value.requiredBranch)
+    && Number.isInteger(value.durationSeconds) && value.durationSeconds > 0
+    && Number.isFinite(value.gearPower)
+    && isNumberRecord(value.bonuses)
+    && Number.isFinite(value.costGold) && value.costGold >= 0
+    && isNonnegativeNumberRecord(value.costResources);
+}
+
+const CRAFTING_JOB_STATUSES = new Set([
+  "pending",
+  "in_progress",
+  "ready_to_claim",
+  "mint_pending",
+  "complete",
+  "failed_recoverable",
+  "cancelled",
+]);
+
+function isCraftingJob(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value)
+    && isString(value.craftingJobId)
+    && isString(value.recipeId)
+    && CRAFTING_JOB_STATUSES.has(value.status)
+    && isTimestamp(value.startedAt)
+    && isTimestamp(value.readyAt)
+    && (value.claimedAt === null || isTimestamp(value.claimedAt))
+    && isNullableString(value.mintStatus)
+    && isNullableString(value.mintError);
+}
+
 function validateRecipes(value) {
   const result = requireObject(value, "recipes");
-  if (!Array.isArray(result.recipes)) throw invalidResponse("recipes");
+  if (!Array.isArray(result.recipes) || !result.recipes.every(isRecipe)) throw invalidResponse("recipes");
   return result;
 }
 
 function validateJobs(value) {
   const result = requireObject(value, "jobs");
-  if (!Array.isArray(result.jobs)) throw invalidResponse("jobs");
+  if (!Array.isArray(result.jobs) || !result.jobs.every(isCraftingJob)) throw invalidResponse("jobs");
   return result;
 }
 
 function validateStart(value) {
   const result = requireObject(value, "start");
-  if (typeof result.craftingJobId !== "string" || typeof result.readyAt !== "string") throw invalidResponse("start");
+  if (!isString(result.craftingJobId) || !isTimestamp(result.readyAt)) throw invalidResponse("start");
   return result;
 }
 
@@ -80,7 +140,7 @@ function validateCancel(value, craftingJobId) {
 
 function validateClaim(value, command) {
   const result = requireObject(value, command);
-  if (!result.craft || typeof result.craft !== "object" || typeof result.craft.gearItemId !== "string"
+  if (!result.craft || typeof result.craft !== "object" || !isString(result.craft.gearItemId)
     || !["complete", "failed_recoverable"].includes(result.craft.mintStatus)) throw invalidResponse(command);
   return result;
 }
@@ -89,12 +149,12 @@ function mutationOperation(method, path, body) {
   return JSON.stringify({ method, path, body });
 }
 
-async function mutate(config, method, path, body, settings, validate) {
+async function mutate(config, method, path, body, settings, validate, transform = (value) => value) {
   const request = requestFor(settings);
   return runDurableMutation(settings.configPath, mutationOperation(method, path, body), async (idempotencyKey) => {
     const result = await request(config, method, path, body, { idempotent: true, idempotencyKey });
-    return validate(result);
-  });
+    return transform(validate(result));
+  }, settings.onResult);
 }
 
 export async function listCraftingRecipes(config, options = {}) {
@@ -115,11 +175,10 @@ export async function startCrafting(config, flags = {}, options = {}) {
   const recipeId = requireRecipeId(flags);
   requireConfirmation(flags, recipeId, "start", "recipeId");
   const settings = normalizeOptions(options);
-  const result = await mutate(config, "POST", "/api/crafting/request", { recipeId }, settings, validateStart);
-  return {
+  return mutate(config, "POST", "/api/crafting/request", { recipeId }, settings, validateStart, (result) => ({
     ...result,
-    nextRecommendedPollAt: result?.readyAt ?? null,
-  };
+    nextRecommendedPollAt: result.readyAt,
+  }));
 }
 
 export async function cancelCrafting(config, flags = {}, options = {}) {

@@ -41,7 +41,7 @@ function definitelyNotCommitted(error) {
   return status >= 400 && status < 500 && error?.code !== "IDEMPOTENCY_IN_FLIGHT";
 }
 
-export async function runDurableMutation(configPath, operation, execute) {
+export async function runDurableMutation(configPath, operation, execute, onResult) {
   if (typeof configPath !== "string" || configPath.length === 0) {
     throw new TypeError("A config path is required for retry-safe mutations.");
   }
@@ -58,6 +58,7 @@ export async function runDurableMutation(configPath, operation, execute) {
     if (!state.pending) await writeJsonAtomic(statePath, { version: 1, pending });
     try {
       const result = await execute(pending.idempotencyKey);
+      if (onResult) await onResult(result);
       await writeJsonAtomic(statePath, emptyMutationState());
       return result;
     } catch (error) {

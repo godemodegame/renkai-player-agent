@@ -194,7 +194,14 @@ export async function main(argv = process.argv.slice(2)) {
     }));
   }
   if (command === "inventory") return print(await readInventory(config, flags));
-  if (command === "crafting") return print(await runCraftingCommand(config, subcommand, flags, { configPath }));
+  if (command === "crafting") {
+    const isMutation = ["start", "cancel", "claim", "retry-mint"].includes(subcommand);
+    const result = await runCraftingCommand(config, subcommand, flags, {
+      configPath,
+      ...(isMutation ? { onResult: (value) => print(value) } : {}),
+    });
+    return isMutation ? result : print(result);
+  }
   throw new Error("Unknown command: " + command + (subcommand ? " " + subcommand : ""));
 }
 

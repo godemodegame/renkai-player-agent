@@ -65,6 +65,25 @@ function endpointUrl(baseUrl, path) {
   return url;
 }
 
+function redactValue(value, secrets) {
+  if (typeof value === "string") {
+    return secrets.reduce((safe, secret) => safe.replaceAll(secret, "[REDACTED]"), value);
+  }
+  if (Array.isArray(value)) return value.map((item) => redactValue(item, secrets));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactValue(item, secrets)]));
+  }
+  return value;
+}
+
+function redactAgentError(error, config) {
+  const secrets = [config.agentKey, config.privateKeyPkcs8].filter((value) => typeof value === "string" && value.length > 0);
+  if (!secrets.length || !error || typeof error !== "object") return error;
+  if (typeof error.message === "string") error.message = redactValue(error.message, secrets);
+  if (error.details !== undefined) error.details = redactValue(error.details, secrets);
+  return error;
+}
+
 export async function parseResponse(response, options = {}) {
   const text = await response.text();
   let payload;
@@ -109,13 +128,17 @@ export async function agentRequest(config, method, path, bodyValue, options = {}
   if (config.agentKey) headers["X-Agent-Key"] = config.agentKey;
   if (bodyValue !== undefined) headers["Content-Type"] = "application/json";
   if (options.idempotent) headers["X-Idempotency-Key"] = options.idempotencyKey ?? randomUUID();
-  return parseResponse(await fetch(endpointUrl(config.baseUrl, path), {
-    method,
-    headers,
-    body: bodyValue === undefined ? undefined : body,
-    redirect: "error",
-    signal: AbortSignal.timeout(15_000),
-  }), options);
+  try {
+    return await parseResponse(await fetch(endpointUrl(config.baseUrl, path), {
+      method,
+      headers,
+      body: bodyValue === undefined ? undefined : body,
+      redirect: "error",
+      signal: AbortSignal.timeout(15_000),
+    }), options);
+  } catch (error) {
+    throw redactAgentError(error, config);
+  }
 }
 
 export async function agentRequestWithMetadata(config, method, path, bodyValue, options = {}) {
