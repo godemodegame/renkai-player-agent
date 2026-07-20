@@ -251,3 +251,16 @@ export async function uninstallAutomation(configPath, config, runtime, options =
   await writeConfig(configPath, config);
   return { installed: false, runtime: selectedRuntime ?? null, removedJobIds };
 }
+
+/** Deprecated migration-only cleanup. It never contacts the game API. */
+export async function cleanupLegacyAutomation(runtime, options = {}) {
+  if (runtime !== "hermes" && runtime !== "openclaw") throw new Error("--runtime must be hermes or openclaw.");
+  const runner = options.runner ?? runRuntimeCommand;
+  const listed = runtimeList(runtime, runner);
+  const removedJobIds = [
+    ...removeNamedJobs(runtime, AUTOMATION_NAME, runner, listed),
+    ...removeNamedJobs(runtime, LEGACY_BATTLE_AUTOMATION_NAME, runner, listed),
+    ...removeNamedJobs(runtime, LEGACY_QUEST_AUTOMATION_NAME, runner, listed),
+  ];
+  return { runtime, removedJobIds, migrationOnly: true };
+}

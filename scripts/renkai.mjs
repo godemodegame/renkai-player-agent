@@ -10,28 +10,22 @@ import {
   signRequest,
   unsignedGet,
 } from "./lib/api.mjs";
-import {
-  automationStatus,
-  installAutomation as installAutomationForEntry,
-  namedJobIds,
-  repairAutomation as repairAutomationForEntry,
-  resolveHermesScriptsDir,
-  runRuntimeCommand,
-  uninstallAutomation,
-} from "./lib/automation.mjs";
-import {
-  battleTick,
-  clearBattlePolicy,
-  clearNextBattle,
-  setBattlePolicy,
-  setNextBattle,
-  takeStep,
-} from "./lib/battle.mjs";
 import { configPathFrom, readConfig, safeProfile } from "./lib/config.mjs";
 import { runCraftingCommand } from "./lib/crafting.mjs";
 import { readInventory } from "./lib/inventory.mjs";
 import { drainNotifications } from "./lib/notifications.mjs";
 import { allocateStats } from "./lib/stats.mjs";
+import {
+  clearWarPledge,
+  listQuests,
+  pledgeWar,
+  playerState,
+  selectBranch,
+  selectClass,
+  startQuest,
+  warState,
+} from "./lib/primitives.mjs";
+import { cleanupLegacyAutomation } from "./lib/automation.mjs";
 import {
   DEFAULT_BASE_URL,
   parseReferralInput,
@@ -39,37 +33,22 @@ import {
   registrationRequestBody,
   setup,
 } from "./lib/onboarding.mjs";
-import { battleWindowContext, chooseQuestArchetype, cycleTarget } from "./lib/strategy.mjs";
 
 const ROOT_ENTRY_PATH = fileURLToPath(import.meta.url);
 
-export {
-  automationStatus,
-  base58Encode,
-  battleTick,
-  battleWindowContext,
-  buildSignatureMessage,
-  chooseQuestArchetype,
-  createWallet,
-  cycleTarget,
-  namedJobIds,
-  parseReferralInput,
-  registrationRequestBody,
-  resolveHermesScriptsDir,
-  runRuntimeCommand,
-  signRequest,
-  uninstallAutomation,
-};
+export { base58Encode, buildSignatureMessage, createWallet, parseReferralInput, registrationRequestBody, signRequest };
 
 function parseArgs(argv) {
   const [command = "help", ...rest] = argv;
   let subcommand;
+  let subsubcommand;
   const flags = {};
   for (let index = 0; index < rest.length; index += 1) {
     const token = rest[index];
     if (!token.startsWith("--")) {
-      if (subcommand) throw new Error("Unexpected argument: " + token);
-      subcommand = token;
+      if (!subcommand) subcommand = token;
+      else if (!subsubcommand) subsubcommand = token;
+      else throw new Error("Unexpected argument: " + token);
       continue;
     }
     const key = token.slice(2);
@@ -82,15 +61,7 @@ function parseArgs(argv) {
     flags[key] = value;
     index += 1;
   }
-  return { command, subcommand, flags };
-}
-
-export async function installAutomation(configPath, config, runtime, flags, options = {}) {
-  return installAutomationForEntry(ROOT_ENTRY_PATH, configPath, config, runtime, flags, options);
-}
-
-export async function repairAutomation(configPath, config, runtime, flags, options = {}) {
-  return repairAutomationForEntry(ROOT_ENTRY_PATH, configPath, config, runtime, flags, options);
+  return { command, subcommand, subsubcommand, flags };
 }
 
 async function doctor(configPath, flags) {
@@ -98,34 +69,20 @@ async function doctor(configPath, flags) {
   try { config = await readConfig(configPath); } catch { config = null; }
   const baseUrl = new URL(flags["base-url"] ?? config?.baseUrl ?? DEFAULT_BASE_URL).origin;
   const health = await unsignedGet(baseUrl, "/api/health");
-  let policy = null;
   let war = null;
   if (config?.agentKey) {
     try {
-      [policy, war] = await Promise.all([
-        agentRequest(config, "GET", "/api/war/policy"),
-        agentRequest(config, "GET", "/api/war/state"),
-      ]);
+      war = await agentRequest(config, "GET", "/api/war/state");
     } catch (error) {
-      policy = { error: error.code ?? error.message };
+      war = { error: error.code ?? error.message };
     }
   }
-  const scheduler = config ? await automationStatus(config) : { installed: false, runtime: null, jobId: null };
-  const allBattlesReady = Boolean(policy?.policy && scheduler.installed && config?.automation.lastRunAt);
-  const battleParticipation = policy?.policy
-    ? allBattlesReady ? "all_battles_ready" : "all_battles_needs_automation"
-    : war?.pledge ? "next_battle_only" : "not_participating";
   return {
     baseUrl,
     health,
     configVersion: config?.version ?? null,
     agentApi: config?.agentKey ? "registered" : config ? "wallet_only" : "not_configured",
-    policy: policy?.policy ?? null,
-    scheduler,
-    lastRunAt: config?.automation.lastRunAt ?? null,
-    nextWarAt: war?.nextWarAt ?? battleWindowContext().scheduledAt,
-    battleParticipation,
-    allBattlesReady,
+    nextWarAt: war?.nextWarAt ?? null,
     setupStatus: config?.agentKey ? "ready" : config ? "wallet_only" : "not_configured",
   };
 }
@@ -145,16 +102,15 @@ function printDurably(value) {
 
 function help() {
   return {
-    usage: "renkai.mjs <doctor|setup|register|profile|state|status|quests|step|inventory|craft|crafting|stats|battle-history|battle-next|battle-policy|battle-tick|automation> [subcommand] [options]",
+    usage: "renkai.mjs <doctor|setup|register|profile|state|status|quests|quest|player|war|inventory|craft|crafting|stats|battle-history> [subcommand] [options]",
     examples: [
-      "renkai.mjs setup --direction miner --resources iron,coal --referral https://app.renkai.xyz/?ref=player_123",
+      "renkai.mjs setup --referral https://app.renkai.xyz/?ref=player_123",
       "renkai.mjs inventory --limit 100",
       "renkai.mjs crafting start --recipe nightglass_dagger_t1 --confirm nightglass_dagger_t1",
       "renkai.mjs crafting list",
       "renkai.mjs stats allocate --stat strength --points 1 --confirm strength:1",
-      "renkai.mjs battle-next set --mode defend",
-      "renkai.mjs battle-policy set --mode attack-fixed --target thornmere",
-      "renkai.mjs automation install --runtime hermes --notify-channel origin",
+      "renkai.mjs quest start --quest-id ashkeep_patrol_01 --confirm ashkeep_patrol_01",
+      "renkai.mjs war pledge --role attack --target thornmere --confirm attack:thornmere",
     ],
     referral: "Pass --referral <https://app.renkai.xyz/...?...ref=player_...>; use --referral none only when there is no referrer.",
     crafting: "Every mutation requires an exact target-matching --confirm. Cancelled jobs do not refund spent Gold or resources; wait for readyAt/nextRecommendedPollAt instead of busy-looping.",
@@ -163,42 +119,26 @@ function help() {
 }
 
 export async function main(argv = process.argv.slice(2)) {
-  const { command, subcommand, flags } = parseArgs(argv);
+  const { command, subcommand, subsubcommand, flags } = parseArgs(argv);
   const configPath = configPathFrom(flags);
   if (command === "help" || command === "--help") return print(help());
   if (command === "doctor") return print(await doctor(configPath, flags));
+  if (command === "legacy-cleanup") return print(await cleanupLegacyAutomation(flags.runtime));
   if (command === "setup") return print(await setup(configPath, flags));
   const config = await readConfig(configPath);
   if (command === "register") return print(await register(configPath, config));
   if (command === "profile") return print(safeProfile(config));
-  if (command === "state") return print(await agentRequest(config, "GET", "/api/player/state"));
-  if (command === "quests") return print(await agentRequest(config, "GET", "/api/quests"));
+  if (command === "state" || (command === "player" && subcommand === "state")) return print(await playerState(config));
+  if (command === "quests" || (command === "quests" && subcommand === "list")) return print(await listQuests(config));
+  if (command === "quest" && subcommand === "list") return print(await listQuests(config));
+  if (command === "quest" && subcommand === "start") return print(await startQuest(config, flags));
+  if (command === "player" && subcommand === "branch" && subsubcommand === "set") return print(await selectBranch(config, flags));
+  if (command === "player" && subcommand === "class" && subsubcommand === "set") return print(await selectClass(config, flags));
   if (command === "battle-history") return print(await agentRequest(config, "GET", "/api/war/history"));
-  if (command === "step") {
-    return drainNotifications(configPath, config, () => takeStep(configPath, config), {
-      projectItem: (item) => item.type === "war_resolved" ? { id: item.id, type: item.type } : item,
-    });
-  }
+  if (command === "war" && subcommand === "state") return print(await warState(config));
+  if (command === "war" && subcommand === "pledge") return print(await pledgeWar(config, flags));
+  if (command === "war" && subcommand === "pledge-clear") return print(await clearWarPledge(config, flags));
   if (command === "inventory") return print(await readInventory(config, flags));
-  if (command === "battle-next" && subcommand === "show") return print(await agentRequest(config, "GET", "/api/war/state"));
-  if (command === "battle-next" && subcommand === "set") return print(await setNextBattle(config, flags.mode, flags.target));
-  if (command === "battle-next" && subcommand === "clear") return print(await clearNextBattle(config));
-  if (command === "battle-policy" && subcommand === "show") return print(await agentRequest(config, "GET", "/api/war/policy"));
-  if (command === "battle-policy" && subcommand === "set") {
-    return print(await setBattlePolicy(configPath, config, flags.mode, flags.target));
-  }
-  if (command === "battle-policy" && subcommand === "clear") return print(await clearBattlePolicy(configPath, config));
-  if (command === "battle-tick") return print(await battleTick(configPath, config), flags.quiet);
-  if (command === "automation" && subcommand === "status") return print(await automationStatus(config));
-  if (command === "automation" && subcommand === "install") {
-    return print(await installAutomation(configPath, config, flags.runtime, flags));
-  }
-  if (command === "automation" && subcommand === "repair") {
-    return print(await repairAutomation(configPath, config, flags.runtime, flags));
-  }
-  if (command === "automation" && subcommand === "uninstall") {
-    return print(await uninstallAutomation(configPath, config, flags.runtime));
-  }
   if (command === "status") {
     return drainNotifications(configPath, config, () => agentRequest(config, "GET", "/api/player/state"));
   }

@@ -3,7 +3,6 @@ import { constants } from "node:fs";
 import { chmod, lstat, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { BRANCH_BY_DIRECTION } from "./strategy.mjs";
 
 function defaultConfigPath() {
   if (process.platform === "win32" && process.env.APPDATA) return join(process.env.APPDATA, "Renkai", "agent.json");
@@ -250,20 +249,17 @@ export function emptyAutomation() {
 
 export function migrateConfig(config) {
   if (!config.walletAddress || !config.privateKeyPkcs8) throw new Error("Renkai config is missing wallet credentials.");
-  if (config.version !== 3) {
-    config.version = 3;
-    config.battle ??= null;
-    config.automation ??= emptyAutomation();
-  }
-  config.automation = { ...emptyAutomation(), ...(config.automation ?? {}) };
+  const legacy = config.version < 4 || Boolean(config.profile || config.battle || config.automation);
+  if (config.version !== 4) config.version = 4;
   config.referral ??= null;
+  if (legacy) config.legacyMigrationRequired = true;
   return config;
 }
 
 export async function readConfig(configPath) {
   try {
     const parsed = await readPrivateJson(configPath);
-    const needsMigration = parsed.version !== 3;
+    const needsMigration = parsed.version !== 4;
     const config = migrateConfig(parsed);
     if (needsMigration) await writeConfig(configPath, config);
     return config;
@@ -294,13 +290,8 @@ export function safeProfile(config) {
     walletAddress: config.walletAddress,
     baseUrl: config.baseUrl,
     registered: Boolean(config.agentKey),
-    direction: config.profile.direction,
-    branch: BRANCH_BY_DIRECTION[config.profile.direction],
-    class: config.profile.direction,
-    resources: config.profile.resources,
-    goal: config.profile.goal,
-    battle: config.battle,
     referredBy: config.referral?.referrerPlayerId ?? null,
+    legacyMigrationRequired: Boolean(config.legacyMigrationRequired),
     setupStatus: config.agentKey ? "ready" : "wallet_only",
   };
 }
