@@ -31,6 +31,7 @@ import { configPathFrom, readConfig, safeProfile } from "./lib/config.mjs";
 import { runCraftingCommand } from "./lib/crafting.mjs";
 import { readInventory } from "./lib/inventory.mjs";
 import { drainNotifications } from "./lib/notifications.mjs";
+import { allocateStats } from "./lib/stats.mjs";
 import {
   DEFAULT_BASE_URL,
   parseReferralInput,
@@ -144,18 +145,20 @@ function printDurably(value) {
 
 function help() {
   return {
-    usage: "renkai.mjs <doctor|setup|register|profile|state|status|quests|step|inventory|crafting|battle-history|battle-next|battle-policy|battle-tick|automation> [subcommand] [options]",
+    usage: "renkai.mjs <doctor|setup|register|profile|state|status|quests|step|inventory|craft|crafting|stats|battle-history|battle-next|battle-policy|battle-tick|automation> [subcommand] [options]",
     examples: [
       "renkai.mjs setup --direction miner --resources iron,coal --referral https://app.renkai.xyz/?ref=player_123",
       "renkai.mjs inventory --limit 100",
       "renkai.mjs crafting start --recipe nightglass_dagger_t1 --confirm nightglass_dagger_t1",
       "renkai.mjs crafting list",
+      "renkai.mjs stats allocate --stat strength --points 1 --confirm strength:1",
       "renkai.mjs battle-next set --mode defend",
       "renkai.mjs battle-policy set --mode attack-fixed --target thornmere",
       "renkai.mjs automation install --runtime hermes --notify-channel origin",
     ],
     referral: "Pass --referral <https://app.renkai.xyz/...?...ref=player_...>; use --referral none only when there is no referrer.",
     crafting: "Every mutation requires an exact target-matching --confirm. Cancelled jobs do not refund spent Gold or resources; wait for readyAt/nextRecommendedPollAt instead of busy-looping.",
+    stats: "Stat allocation spends pooled points and Gold. It requires --confirm <stat>:<points> and is retried with one idempotency key when the result is ambiguous.",
   };
 }
 
@@ -199,7 +202,7 @@ export async function main(argv = process.argv.slice(2)) {
   if (command === "status") {
     return drainNotifications(configPath, config, () => agentRequest(config, "GET", "/api/player/state"));
   }
-  if (command === "crafting") {
+  if (command === "crafting" || command === "craft") {
     const isMutation = ["start", "cancel", "claim", "retry-mint"].includes(subcommand);
     const result = await runCraftingCommand(config, subcommand, flags, {
       configPath,
@@ -207,6 +210,7 @@ export async function main(argv = process.argv.slice(2)) {
     });
     return isMutation ? result : print(result);
   }
+  if (command === "stats" && subcommand === "allocate") return print(await allocateStats(config, flags, { configPath }));
   throw new Error("Unknown command: " + command + (subcommand ? " " + subcommand : ""));
 }
 

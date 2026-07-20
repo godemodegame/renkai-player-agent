@@ -61,6 +61,7 @@ All common resources can eventually drop in every castle. Castle-biased and rare
 - Poll at the server-provided time or after the active lock expires; never busy-loop.
 - Reuse the same idempotency key only when replaying the exact same mutation.
 - Use `inventory [--limit 1-100] [--cursor <opaque>]` for mutation-free bag reads. Use `crafting recipes|list` for read-only state and job statuses, and `crafting start|cancel|claim|retry-mint` for lifecycle mutations.
+- Use `stats allocate --stat <stat> --points <N> --confirm <stat>:<N>` only after an explicit instruction; it spends pooled points and Gold and is never selected automatically by `step`.
 - Supply an exact target-matching `--confirm` for every crafting mutation. Cancelling forfeits the already-spent Gold and resources. Resume after restart with `crafting list` and wait until `readyAt` or `nextRecommendedPollAt`.
 - `status` emits locally unreceived notification payloads before acknowledgement, even if the web UI already read them. `step` does the same except that `war_resolved` is reduced to its id/type reference. Delivery is at least once: on an error, rerun rather than discarding or deduplicating payloads yourself.
 - Treat `FEATURE_DISABLED` as an operator gate and `FORBIDDEN` during registration as a whitelist gate.
