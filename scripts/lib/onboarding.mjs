@@ -1,6 +1,5 @@
 import { agentRequest, createWallet } from "./api.mjs";
-import { emptyAutomation, readConfig, safeProfile, writeConfig } from "./config.mjs";
-import { DIRECTIONS } from "./strategy.mjs";
+import { readConfig, safeProfile, writeConfig } from "./config.mjs";
 
 export const DEFAULT_BASE_URL = "https://api.renkai.xyz";
 const WAITLIST_ACCESS = {
@@ -68,10 +67,6 @@ export async function register(configPath, config) {
 }
 
 export async function setup(configPath, flags) {
-  const direction = flags.direction;
-  if (!DIRECTIONS.has(direction)) throw new Error("--direction must be attacker, defender, blacksmith, or miner.");
-  const resources = (flags.resources ?? "common").split(",").map((value) => value.trim().toLowerCase()).filter(Boolean);
-  const goal = flags.goal ?? "balanced";
   const requestedBaseUrl = flags["base-url"] ? new URL(flags["base-url"]).origin : null;
   const desiredReferral = parseReferralInput(flags.referral);
   let config;
@@ -81,31 +76,27 @@ export async function setup(configPath, flags) {
   } catch (error) {
     if (!String(error.message).startsWith("No Renkai agent config")) throw error;
     config = {
-      version: 3,
+      version: 4,
       ...createWallet(),
       baseUrl: requestedBaseUrl ?? DEFAULT_BASE_URL,
-      profile: { direction, resources, goal },
-      battle: null,
       referral: desiredReferral,
-      automation: emptyAutomation(),
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
     walletCreated = true;
   }
-  config.version = 3;
+  config.version = 4;
   if (config.agentKey && config.referral?.referrerPlayerId !== desiredReferral?.referrerPlayerId) {
     throw new Error("Referral attribution is immutable after agent registration. Keep the original referral choice.");
   }
   config.baseUrl = requestedBaseUrl ?? config.baseUrl ?? DEFAULT_BASE_URL;
-  config.profile = { direction, resources, goal };
   config.referral = desiredReferral;
   config.updatedAt = new Date().toISOString();
   await writeConfig(configPath, config);
   if (flags.offline) return { ...safeProfile(config), walletCreated, registration: "skipped" };
   try {
     const registration = config.agentKey ? { registered: true, keyStored: true } : await register(configPath, config);
-    return { ...safeProfile(config), walletCreated, ...registration, battleParticipation: config.battle ? "all_battles" : "not_participating" };
+    return { ...safeProfile(config), walletCreated, ...registration };
   } catch (error) {
     error.publicContext = { ...safeProfile(config), walletCreated, configSaved: true };
     throw error;

@@ -1,10 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createWallet } from "./renkai.mjs";
-import { takeStep } from "./lib/battle.mjs";
 import { allocateStats } from "./lib/stats.mjs";
 
 async function mutationPath() {
@@ -57,46 +55,4 @@ test("rejects malformed allocation receipts and retains the retry identity", asy
   const pending = JSON.parse(await readFile(`${configPath}.mutations.json`, "utf8"));
   assert.equal(pending.pending.operation.includes("defence"), true);
   assert.equal(typeof pending.pending.idempotencyKey, "string");
-});
-
-test("step starts the first affordable blacksmith recipe before a quest", async () => {
-  const directory = await mkdtemp(join(tmpdir(), "renkai-step-craft-"));
-  const configPath = join(directory, "agent.json");
-  const config = {
-    version: 3,
-    ...createWallet(),
-    baseUrl: "https://example.invalid",
-    agentKey: "key",
-    profile: { direction: "blacksmith", resources: ["iron"], goal: "balanced", craftingReserve: { iron: 1 } },
-    battle: null,
-    automation: { runtime: null, jobId: null, scriptPath: null, lastRunAt: null, lastPledgedWindowId: null, lastAlertedWindowId: null, notification: null },
-  };
-  await writeFile(configPath, JSON.stringify(config));
-  const calls = [];
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (url, options = {}) => {
-    const path = new URL(url).pathname;
-    calls.push({ method: options.method ?? "GET", path });
-    const data = path === "/api/war/state"
-      ? { nextWarAt: "2099-01-01T00:00:00.000Z", policy: null, pledge: null }
-      : path === "/api/player/state"
-        ? { player: { level: 20, branch: "laborer", class: "blacksmith", gold: 100, status: "idle", currentStamina: 10 } }
-        : path === "/api/crafting/recipes"
-          ? { recipes: [{ id: "recipe_a", name: "Iron Blade", tier: "T1", slot: "weapon", requiredStation: "forge", requiredPlayerLevel: 5, requiredCastleId: null, requiredBranch: "laborer", durationSeconds: 60, gearPower: 5, bonuses: {}, costGold: 10, costResources: { iron: 1 } }] }
-          : path === "/api/crafting/jobs"
-            ? { jobs: [] }
-            : path === "/api/inventory"
-              ? { observedAt: "2099-01-01T00:00:00.000Z", resources: { items: [{ resourceId: "iron", category: "ore", amount: 2 }], totalCount: 1 }, gear: { items: [], nextCursor: null }, weight: { system: "castle_population", activeWeight: 1, capacityWeight: null } }
-              : { craftingJobId: "job_a", readyAt: "2099-01-01T00:01:00.000Z" };
-    return new Response(JSON.stringify({ data }), { status: 200, headers: { "Content-Type": "application/json" } });
-  };
-  try {
-    const result = await takeStep(configPath, config);
-    assert.equal(result.action, "started_craft");
-    assert.equal(result.recipe.id, "recipe_a");
-    assert.equal(calls.some(({ method, path }) => method === "POST" && path === "/api/crafting/request"), true);
-    assert.equal(calls.some(({ path }) => path === "/api/quests"), false);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
 });

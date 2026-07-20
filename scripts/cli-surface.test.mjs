@@ -8,46 +8,15 @@ import test from "node:test";
 import * as cli from "./renkai.mjs";
 import { readMutationState } from "./lib/mutations.mjs";
 
-const LEGACY_EXPORTS = [
-  "automationStatus",
-  "base58Encode",
-  "battleTick",
-  "battleWindowContext",
-  "buildSignatureMessage",
-  "chooseQuestArchetype",
-  "cliErrorOutput",
-  "createWallet",
-  "cycleTarget",
-  "installAutomation",
-  "main",
-  "namedJobIds",
-  "parseReferralInput",
-  "registrationRequestBody",
-  "repairAutomation",
-  "resolveHermesScriptsDir",
-  "runRuntimeCommand",
-  "signRequest",
-  "uninstallAutomation",
-];
+const EXPLICIT_EXPORTS = ["base58Encode", "buildSignatureMessage", "cliErrorOutput", "createWallet", "main", "parseReferralInput", "registrationRequestBody", "signRequest"];
 
 function testConfig() {
   return {
-    version: 3,
+    version: 4,
     ...cli.createWallet(),
     baseUrl: "https://example.invalid",
     agentKey: "test-agent-key",
-    profile: { direction: "miner", resources: ["iron"], goal: "balanced" },
-    battle: null,
     referral: null,
-    automation: {
-      runtime: null,
-      jobId: null,
-      scriptPath: null,
-      lastRunAt: null,
-      lastPledgedWindowId: null,
-      lastAlertedWindowId: null,
-      notification: null,
-    },
   };
 }
 
@@ -66,8 +35,8 @@ async function withCapturedStdout(action) {
   }
 }
 
-test("exports the complete legacy surface", () => {
-  assert.deepEqual(Object.keys(cli).sort(), [...LEGACY_EXPORTS].sort());
+test("exports the explicit public surface", () => {
+  assert.deepEqual(Object.keys(cli).sort(), [...EXPLICIT_EXPORTS].sort());
 });
 
 test("prints a JSON help document before config access", async () => {
@@ -77,7 +46,7 @@ test("prints a JSON help document before config access", async () => {
   assert.equal(Array.isArray(help.examples), true);
 });
 
-test("routes legacy read commands", async () => {
+test("routes explicit read and pledge commands", async () => {
   const directory = await mkdtemp(join(tmpdir(), "renkai-cli-surface-"));
   const configPath = join(directory, "agent.json");
   await writeFile(configPath, JSON.stringify(testConfig()), { mode: 0o600 });
@@ -87,7 +56,7 @@ test("routes legacy read commands", async () => {
     const path = new URL(url).pathname;
     requests.push({ method: options.method ?? "GET", path });
     const data = path === "/api/war/state"
-      ? { nextWarAt: "2099-01-01T00:00:00.000Z", policy: null, pledge: null }
+      ? { nextWarAt: "2099-01-01T00:00:00.000Z", pledge: null }
       : path === "/api/player/state"
         ? { player: { level: 1, branch: null, class: null, gold: 0, status: "idle", currentStamina: 10, castleId: "ashkeep" } }
         : path === "/api/notifications"
@@ -101,7 +70,8 @@ test("routes legacy read commands", async () => {
     await withCapturedStdout(async () => {
       await cli.main(["state", "--config", configPath]);
       await cli.main(["quests", "--config", configPath]);
-      await cli.main(["step", "--config", configPath]);
+      await cli.main(["player", "state", "--config", configPath]);
+      await cli.main(["war", "pledge", "--role", "defend", "--confirm", "defend", "--config", configPath]);
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -109,11 +79,8 @@ test("routes legacy read commands", async () => {
   assert.deepEqual(requests.map(({ method, path }) => `${method} ${path}`), [
     "GET /api/player/state",
     "GET /api/quests",
-    "GET /api/war/state",
     "GET /api/player/state",
-    "GET /api/quests",
-    "POST /api/quest/start",
-    "GET /api/notifications",
+    "POST /api/war/pledge",
   ]);
 });
 
