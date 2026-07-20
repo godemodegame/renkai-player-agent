@@ -1,4 +1,6 @@
 import { agentRequest } from "./api.mjs";
+import { listCraftingJobs, listCraftingRecipes, startCrafting } from "./crafting.mjs";
+import { readInventory } from "./inventory.mjs";
 import { writeConfig } from "./config.mjs";
 import {
   BATTLE_MODES,
@@ -228,6 +230,10 @@ export async function takeStep(configPath, config) {
   if (player.level >= 15 && player.branch && !player.class && player.gold >= 100) {
     return { action: "selected_class", class: desiredClass, result: await agentRequest(config, "POST", "/api/player/class", { class: desiredClass }, { idempotent: true }) };
   }
+  if (player.class === "blacksmith") {
+    const crafting = await chooseCraftingAction(config, configPath, player);
+    if (crafting) return crafting;
+  }
   if (player.currentStamina < 1) return { action: "wait", reason: "no_stamina", retryAt: player.nextStaminaAt, progressionPending };
   const questData = await agentRequest(config, "GET", "/api/quests");
   const preferredArchetype = chooseQuestArchetype(config.profile);
@@ -244,4 +250,38 @@ export async function takeStep(configPath, config) {
       ? `The assigned castle ${player.castleId} does not directly favor: ${incompatibleResources.join(", ")}.`
       : undefined,
   };
+}
+
+function affordable(recipe, resources, player, reserve) {
+  if (player.gold < recipe.costGold) return false;
+  return Object.entries(recipe.costResources).every(([resource, cost]) =>
+    (resources.get(resource) ?? 0) - (reserve[resource] ?? 0) >= cost);
+}
+
+async function chooseCraftingAction(config, configPath, player) {
+  let recipes;
+  let jobs;
+  let inventory;
+  try {
+    [recipes, jobs, inventory] = await Promise.all([
+      listCraftingRecipes(config),
+      listCraftingJobs(config),
+      readInventory(config),
+    ]);
+  } catch (error) {
+    if (["API_NOT_DEPLOYED", "API_RESPONSE_INVALID", "NOT_FOUND"].includes(error.code)) return null;
+    throw error;
+  }
+  const pending = jobs.jobs.find((job) => ["pending", "in_progress", "mint_pending"].includes(job.status));
+  if (pending) return { action: "wait", reason: "crafting_in_progress", craftingJobId: pending.craftingJobId, retryAt: pending.readyAt };
+  const resources = new Map(inventory.resources.items.map((item) => [item.resourceId, item.amount]));
+  const reserve = config.profile.craftingReserve && typeof config.profile.craftingReserve === "object"
+    ? config.profile.craftingReserve
+    : {};
+  const recipe = [...recipes.recipes]
+    .filter((candidate) => candidate.requiredStation === "forge" && affordable(candidate, resources, player, reserve))
+    .sort((left, right) => left.id.localeCompare(right.id))[0];
+  if (!recipe) return null;
+  const started = await startCrafting(config, { recipe: recipe.id, confirm: recipe.id }, { configPath });
+  return { action: "started_craft", recipe: { id: recipe.id, name: recipe.name }, retryAt: started.readyAt, result: started };
 }

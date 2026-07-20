@@ -54,6 +54,14 @@ node {baseDir}/scripts/renkai.mjs inventory [--limit <1-100>] [--cursor <opaque-
 
 The result includes `observedAt`, explicit resource zeroes, gear instance and recipe IDs, item state, stable `nextCursor`, and castle-population `weight`; it does not claim rewards or mutate inventory.
 
+Allocate pooled stat points only after explicit confirmation of the exact spend:
+
+```bash
+node {baseDir}/scripts/renkai.mjs stats allocate --stat <strength|defence|luck|intelligence> --points <positive-integer> --confirm <stat>:<points>
+```
+
+The allocation is idempotent and spends both pooled points and Gold. A blacksmith `step` chooses the lexicographically first affordable forge recipe, honoring `profile.craftingReserve`; otherwise it continues with progression or a quest. Missing or ambiguous crafting data is handled without starting a craft.
+
 Inspect recipes and manage crafting jobs with exact target confirmation on every spend or lifecycle mutation:
 
 ```bash
@@ -115,6 +123,7 @@ Read [game-api.md](references/game-api.md) for the latest-result and notificatio
 - Do not fund the agent wallet or request mainnet assets. Renkai currently reports devnet and gameplay state is off-chain.
 - Do not start a second action while the player is locked or has an active quest.
 - Every crafting mutation requires `--confirm` to exactly match its recipe/job target. Cancelling forfeits spent Gold and resources; never describe it as a refund.
+- Every stat allocation requires `--confirm <stat>:<points>` and must never be inferred from available points or Gold.
 - Retry an ambiguous crafting mutation with the exact same command promptly, and always within 23 hours, before starting a different mutation. The private mutation sidecar preserves its idempotency key until a valid result is observed. After that replay window the CLI fails closed with `MUTATION_RETRY_EXPIRED`; reconcile the job/server state before manually removing the sidecar, because the API's idempotency record may have expired.
 - Never infer battle participation from class, direction, resources, or prior silence. No instruction means no participation.
 - Distinguish “next battle” from “all battles”; never persist or automate a one-battle instruction.
