@@ -235,24 +235,17 @@ export async function releaseNotificationLock(lock, token) {
   }
 }
 
-export function emptyAutomation() {
-  return {
-    runtime: null,
-    jobId: null,
-    scriptPath: null,
-    lastRunAt: null,
-    lastPledgedWindowId: null,
-    lastAlertedWindowId: null,
-    notification: null,
-  };
-}
-
 export function migrateConfig(config) {
   if (!config.walletAddress || !config.privateKeyPkcs8) throw new Error("Renkai config is missing wallet credentials.");
   const legacy = config.version < 4 || Boolean(config.profile || config.battle || config.automation);
   if (config.version !== 4) config.version = 4;
   config.referral ??= null;
-  if (legacy) config.legacyMigrationRequired = true;
+  if (legacy) {
+    config.legacyMigrationRequired = true;
+    delete config.profile;
+    delete config.battle;
+    delete config.automation;
+  }
   return config;
 }
 

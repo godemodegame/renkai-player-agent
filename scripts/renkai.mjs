@@ -81,6 +81,7 @@ async function doctor(configPath, flags) {
     baseUrl,
     health,
     configVersion: config?.version ?? null,
+    legacyMigrationRequired: Boolean(config?.legacyMigrationRequired),
     agentApi: config?.agentKey ? "registered" : config ? "wallet_only" : "not_configured",
     nextWarAt: war?.nextWarAt ?? null,
     setupStatus: config?.agentKey ? "ready" : config ? "wallet_only" : "not_configured",
@@ -102,7 +103,7 @@ function printDurably(value) {
 
 function help() {
   return {
-    usage: "renkai.mjs <doctor|setup|register|profile|state|status|quests|quest|player|war|inventory|craft|crafting|stats|battle-history> [subcommand] [options]",
+    usage: "renkai.mjs <doctor|setup|register|legacy-cleanup|profile|state|status|quests|quest|player|war|inventory|craft|crafting|stats|battle-history> [subcommand] [options]",
     examples: [
       "renkai.mjs setup --referral https://app.renkai.xyz/?ref=player_123",
       "renkai.mjs inventory --limit 100",
@@ -111,6 +112,7 @@ function help() {
       "renkai.mjs stats allocate --stat strength --points 1 --confirm strength:1",
       "renkai.mjs quest start --quest-id ashkeep_patrol_01 --confirm ashkeep_patrol_01",
       "renkai.mjs war pledge --role attack --target thornmere --confirm attack:thornmere",
+      "renkai.mjs legacy-cleanup --runtime hermes",
     ],
     referral: "Pass --referral <https://app.renkai.xyz/...?...ref=player_...>; use --referral none only when there is no referrer.",
     crafting: "Every mutation requires an exact target-matching --confirm. Cancelled jobs do not refund spent Gold or resources; wait for readyAt/nextRecommendedPollAt instead of busy-looping.",
